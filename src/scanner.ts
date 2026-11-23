@@ -1047,7 +1047,7 @@ export function findLiteralLines(
       if (multilineLines[index]) literal[index] = true;
     }
   }
-  const { open: mathOpen, ends: blockEnds } = regions;
+  const { ends: blockEnds } = regions;
 
   // `$$` blocks are Obsidian syntax the parser does not know. They are found
   // line by line, and the document is reparsed after blanking them so a fence
