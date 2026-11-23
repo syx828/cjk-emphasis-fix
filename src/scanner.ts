@@ -412,18 +412,27 @@ export interface ParserEmphasis extends TextMask {
   kind?: EmphasisKind;
 }
 
+export interface OverflowMatch {
+  /** Absolute end of the marked span. */
+  to: number;
+  delimiterLength: number;
+  kind?: EmphasisKind;
+}
+
 /**
  * Parser emphasis that reaches past an intended closing delimiter.
  *
- * A parser run that starts inside or before the span and ends after the
- * delimiter styles characters the author did not mark. Several runs may cover
- * the same span, so every one of them is considered instead of only the first
- * range that happens to cover the whole content. A run of a different kind is
- * a separate construct (bold next to italic) and is left alone.
+ * Two shapes matter. A run that starts before the closer and ends after it is
+ * overflow and is reset from the closer onwards. A run that starts at or just
+ * after the closer is the parser opening a new span on the delimiter the
+ * author used to close; that tail is reset too, unless whitespace separates the
+ * two spans. Runs of another kind are separate constructs and stay styled.
  */
 export function findExcessParserRanges(
-  matches: readonly { to: number; kind?: EmphasisKind }[],
+  matches: readonly OverflowMatch[],
   parserRanges: readonly ParserEmphasis[],
+  lineText: string,
+  lineFrom: number,
   lineTo: number,
 ): TextMask[] {
   const excess: TextMask[] = [];
@@ -432,10 +441,21 @@ export function findExcessParserRanges(
       if (range.kind !== undefined && match.kind !== undefined && range.kind !== match.kind) {
         continue;
       }
-      if (range.to <= match.to || range.from >= match.to) continue;
-      const from = Math.max(match.to, range.from);
+      if (range.to <= match.to) continue;
       const to = Math.min(range.to, lineTo);
-      if (to > from) excess.push({ from, to });
+      if (to <= match.to) continue;
+
+      if (range.from < match.to) {
+        excess.push({ from: match.to, to });
+        continue;
+      }
+
+      // Started at or after the closer: only treat it as overflow when it
+      // begins inside the closing marker run itself.
+      if (range.from > match.to + match.delimiterLength) continue;
+      const gap = lineText.slice(match.to - lineFrom, range.from - lineFrom);
+      if (/\s/.test(gap)) continue;
+      if (range.from < to) excess.push({ from: range.from, to });
     }
   }
   return excess;

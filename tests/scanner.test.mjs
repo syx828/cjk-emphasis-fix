@@ -209,21 +209,65 @@ assert.equal(findDocumentFixes("<div>\n**字。**后\n</div>\n\n**字。**后\n"
 assert.equal(findDocumentFixes("~~~\r\nx\r\n~~~\r\n**字。**后").length, 1);
 
 // Parser runs that overflow a marked span, including split runs.
-assert.deepEqual(findExcessParserRanges([{ to: 102 }], [{ from: 23, to: 111 }], 200), [
-  { from: 102, to: 111 },
-]);
+const overflowText = "x".repeat(200);
 assert.deepEqual(
-  findExcessParserRanges([{ to: 102 }], [{ from: 23, to: 29 }, { from: 42, to: 111 }], 200),
+  findExcessParserRanges([{ to: 102, delimiterLength: 2 }], [{ from: 23, to: 111 }], overflowText, 0, 200),
   [{ from: 102, to: 111 }],
 );
-assert.deepEqual(findExcessParserRanges([{ to: 102 }], [{ from: 102, to: 111 }], 200), []);
-assert.deepEqual(findExcessParserRanges([{ to: 5 }], [{ from: 5, to: 8 }], 8), []);
-assert.deepEqual(findExcessParserRanges([{ to: 102 }], [{ from: 23, to: 100 }], 200), []);
-assert.deepEqual(findExcessParserRanges([{ to: 102 }], [{ from: 120, to: 130 }], 200), []);
+assert.deepEqual(
+  findExcessParserRanges(
+    [{ to: 102, delimiterLength: 2 }],
+    [{ from: 23, to: 29 }, { from: 42, to: 111 }],
+    overflowText,
+    0,
+    200,
+  ),
+  [{ from: 102, to: 111 }],
+);
+assert.deepEqual(
+  findExcessParserRanges([{ to: 102, delimiterLength: 2 }], [{ from: 102, to: 111 }], overflowText, 0, 200),
+  [{ from: 102, to: 111 }],
+);
+assert.deepEqual(
+  findExcessParserRanges([{ to: 102, delimiterLength: 2 }], [{ from: 102, to: 100 }], overflowText, 0, 200),
+  [],
+);
+assert.deepEqual(
+  findExcessParserRanges([{ to: 102, delimiterLength: 2 }], [{ from: 120, to: 130 }], overflowText, 0, 200),
+  [],
+);
 // A run of another kind is a separate construct, not overflow.
 assert.deepEqual(
-  findExcessParserRanges([{ to: 5, kind: "strong" }], [{ from: 5, to: 8, kind: "em" }], 8),
+  findExcessParserRanges(
+    [{ to: 5, delimiterLength: 2, kind: "strong" }],
+    [{ from: 5, to: 8, kind: "em" }],
+    "      ",
+    0,
+    8,
+  ),
   [],
+);
+// Whitespace between the spans keeps a separate bold intact.
+assert.deepEqual(
+  findExcessParserRanges(
+    [{ to: 6, delimiterLength: 2, kind: "strong" }],
+    [{ from: 7, to: 11, kind: "strong" }],
+    "**字。** **粗**",
+    0,
+    12,
+  ),
+  [],
+);
+// No whitespace: the parser opened a new span on the closing delimiter.
+assert.deepEqual(
+  findExcessParserRanges(
+    [{ to: 6, delimiterLength: 2, kind: "strong" }],
+    [{ from: 8, to: 12, kind: "strong" }],
+    "**字。****粗**",
+    0,
+    13,
+  ),
+  [{ from: 8, to: 12 }],
 );
 
 // Every common Chinese punctuation mark, both for rendering and for the

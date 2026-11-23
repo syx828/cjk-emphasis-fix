@@ -130,8 +130,14 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
     // The parser may style a wider run than the author marked. Several runs
     // can be involved, so the excess is collected for the whole line first.
     const excess = findExcessParserRanges(
-      matches.map((match) => ({ to: line.from + match.to, kind: match.kind })),
+      matches.map((match) => ({
+        to: line.from + match.to,
+        delimiterLength: match.delimiterLength,
+        kind: match.kind,
+      })),
       lineParser,
+      line.text,
+      line.from,
       line.to,
     );
     for (const range of excess) {
