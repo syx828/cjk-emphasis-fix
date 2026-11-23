@@ -542,16 +542,9 @@ export function scanLine(text: string): {
 export function scanPreviewLine(
   text: string,
   barriers: readonly TextMask[] = [],
-  extraTokens: readonly TextMask[] = [],
 ): { tokens: InlineToken[]; matches: EmphasisMatch[] } {
   const normalized = mergeRanges(barriers);
-  const own = tokenizePreviewLine(text, normalized).filter(
-    (token) => !extraTokens.some((extra) => token.from < extra.to && extra.from < token.to),
-  );
-  const tokens: InlineToken[] = [
-    ...own,
-    ...extraTokens.map((extra) => ({ from: extra.from, to: extra.to, kind: "code" as const })),
-  ].sort((a, b) => a.from - b.from);
+  const tokens = tokenizePreviewLine(text, normalized);
   return { tokens, matches: scanEmphasis(text, tokens, normalized) };
 }
 
@@ -900,12 +893,6 @@ export interface LiteralOptions {
    * requires a bare `$$` line on both ends and is used by Live Preview.
    */
   displayBlocks?: "legacy" | "standalone";
-  /**
-   * Treat lines touched by a multi-line inline code span as literal. The
-   * source-rewrite command needs this; Live Preview masks the code range and
-   * scans the rest of the line instead.
-   */
-  multilineCode?: boolean;
 }
 
 export function findLiteralLines(
@@ -913,7 +900,6 @@ export function findLiteralLines(
   options: LiteralOptions = {},
 ): boolean[] {
   const standaloneDisplay = (options.displayBlocks ?? "legacy") === "standalone";
-  const markMultilineCode = options.multilineCode ?? true;
   const stripped = lines.map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
   // A leading BOM hides the first line from the Markdown parser (indented code
   // and fences stop being recognised). Strip it from the parse input; the line
@@ -958,10 +944,9 @@ export function findLiteralLines(
     literal[index] = true;
   }
 
-  // Inline code that spans lines makes every line it touches literal unless
-  // the caller (Live Preview) masks the code range and scans the rest. Spans
-  // that start inside an open display block are math content, not code.
-  const multilineLines = new Array<boolean>(lines.length).fill(false);
+  // Inline code that spans lines makes every line it touches literal. A span
+  // on one line is handled by the per-line masks. Spans that start inside an
+  // open display block are math content, not code.
   const mathSkip = parserLiteral.map(
     (value, index) => value || index <= frontmatterEnd,
   );
@@ -977,10 +962,7 @@ export function findLiteralLines(
     if (startsInsideDisplayMath(stripped, mathOpen, first, column, standaloneDisplay)) continue;
     const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
     if (first === last) continue;
-    for (let index = first; index <= last; index++) {
-      multilineLines[index] = true;
-      if (markMultilineCode) literal[index] = true;
-    }
+    for (let index = first; index <= last; index++) literal[index] = true;
   }
 
   // `$$` blocks are Obsidian syntax the parser does not know. They are found
@@ -1066,7 +1048,6 @@ export function findLiteralLines(
       }
     }
     for (const node of reparsed.inlineNodes) {
-      if (!markMultilineCode) break;
       const first = lineIndexAt(starts, node.from);
       const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
       if (first === last) continue;

@@ -96,28 +96,13 @@ function collectBarriers(view: EditorView): TextMask[] {
   return barriers;
 }
 
-function collectInlineCode(view: EditorView): TextMask[] {
-  const ranges: TextMask[] = [];
-  syntaxTree(view.state).iterate({
-    enter(node) {
-      if (node.name === "InlineCode") {
-        ranges.push({ from: node.from, to: node.to });
-      }
-    },
-  });
-  return ranges;
-}
-
 /** Literal-line map for a whole document, computed once per edit. */
 function literalLinesFor(doc: Text): boolean[] {
   const lines: string[] = [];
   for (const line of doc.iterLines(1, doc.lines + 1)) {
     lines.push(line);
   }
-  return findLiteralLines(lines, {
-    displayBlocks: "standalone",
-    multilineCode: false,
-  });
+  return findLiteralLines(lines, { displayBlocks: "standalone" });
 }
 
 function buildDecorations(view: EditorView, literalLines: boolean[]): DecorationSet {
@@ -132,7 +117,6 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
   const doc = view.state.doc;
   const parserRanges = collectParserEmphasis(view);
   const barriers = collectBarriers(view);
-  const inlineCode = collectInlineCode(view);
   const cursorHead = view.state.selection.main.head;
 
   const marks = new Map<string, Decoration>();
@@ -216,15 +200,7 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
         return !bracketInsideToken(candidate.from) && !bracketInsideToken(candidate.to - 1);
       }),
     ];
-    const lineCode: TextMask[] = [];
-    for (const range of inlineCode) {
-      if (range.to <= line.from || range.from >= line.to) continue;
-      lineCode.push({
-        from: Math.max(range.from, line.from) - line.from,
-        to: Math.min(range.to, line.to) - line.from,
-      });
-    }
-    const { tokens, matches } = scanPreviewLine(line.text, lineBarriers, lineCode);
+    const { tokens, matches } = scanPreviewLine(line.text, lineBarriers);
     if (matches.length === 0) continue;
 
     const cursorOnLine = cursorHead >= line.from && cursorHead <= line.to;
