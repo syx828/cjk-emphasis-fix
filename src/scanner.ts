@@ -825,13 +825,14 @@ function stripMathMarkers(line: string): string {
   }
 }
 
-function startsInsideDisplayMath(
+function mathOpenBefore(
   lines: readonly string[],
-  firstLine: number,
   standalone: boolean,
-): boolean {
+): boolean[] {
+  const open = new Array<boolean>(lines.length + 1).fill(false);
   let inMath = false;
-  for (let index = 0; index < firstLine; index++) {
+  for (let index = 0; index < lines.length; index++) {
+    open[index] = inMath;
     const candidate = stripMathMarkers(lines[index].replace(/\r$/, ""));
     if (inMath) {
       const closes = standalone
@@ -845,7 +846,24 @@ function startsInsideDisplayMath(
       : candidate.startsWith("$$") && candidate.indexOf("$$", 2) === -1;
     if (opens) inMath = true;
   }
-  return inMath;
+  open[lines.length] = inMath;
+  return open;
+}
+
+function startsInsideDisplayMath(
+  lines: readonly string[],
+  open: readonly boolean[],
+  lineIndex: number,
+  column: number,
+  standalone: boolean,
+): boolean {
+  if (open[lineIndex]) return true;
+  if (standalone) return false;
+  // Legacy blocks may open on a line that also carries the code span,
+  // e.g. ``$$` ``; anything after the opener on that line is math content.
+  if (column <= 0) return false;
+  const candidate = stripMathMarkers(lines[lineIndex].replace(/\r$/, ""));
+  return candidate.startsWith("$$") && candidate.indexOf("$$", 2) === -1;
 }
 
 export interface LiteralOptions {
@@ -900,10 +918,13 @@ export function findLiteralLines(
   }
 
   // Inline code that spans lines makes every line it touches literal. A span
-  // on one line is handled by the per-line masks.
+  // on one line is handled by the per-line masks. Spans that start inside an
+  // open display block are math content, not code.
+  const mathOpen = mathOpenBefore(stripped, standaloneDisplay);
   for (const node of parsed.inlineNodes) {
     const first = lineIndexAt(starts, node.from);
-    if (startsInsideDisplayMath(stripped, first, standaloneDisplay)) continue;
+    const column = node.from - starts[first];
+    if (startsInsideDisplayMath(stripped, mathOpen, first, column, standaloneDisplay)) continue;
     const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
     if (first === last) continue;
     for (let index = first; index <= last; index++) literal[index] = true;
@@ -924,7 +945,14 @@ export function findLiteralLines(
   }
   for (const node of parsed.inlineNodes) {
     const first = lineIndexAt(starts, node.from);
-    if (startsInsideDisplayMath(stripped, first, standaloneDisplay)) continue;
+    const column = node.from - starts[first];
+    if (startsInsideDisplayMath(stripped, mathOpen, first, column, standaloneDisplay)) {
+      // This "code span" starts inside math, so its characters are math
+      // content. Blank the whole span so its closing backtick cannot pair with
+      // a later one in the reparsed document.
+      blankRange(node.from, node.to);
+      continue;
+    }
     const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
     if (first !== last) blankRange(node.from, node.to);
   }
@@ -1051,21 +1079,35 @@ export function findDocumentFixes(text: string): SourceFix[] {
       }
     },
   });
-  const usableInline = inlineRanges.filter(
-    (range) =>
-      !startsInsideDisplayMath(lines, lineIndexAt(starts, range.from), false),
-  );
+  const mathOpen = mathOpenBefore(lines, false);
+  const usableInline: TextMask[] = [];
   const characters = text.split("");
   const blankRange = (from: number, to: number): void => {
     for (let index = Math.max(0, from); index < Math.min(characters.length, to); index++) {
       if (characters[index] !== "\n") characters[index] = " ";
     }
   };
-  for (const range of usableInline) blankRange(range.from, range.to);
+  for (const range of inlineRanges) {
+    const first = lineIndexAt(starts, range.from);
+    const column = range.from - starts[first];
+    if (startsInsideDisplayMath(lines, mathOpen, first, column, false)) {
+      // Math content: blank it so its backticks cannot pair with later ones.
+      blankRange(range.from, range.to);
+      continue;
+    }
+    usableInline.push(range);
+    blankRange(range.from, range.to);
+  }
   for (let index = 0; index < lines.length; index++) {
     if (!literal[index]) continue;
     const lineFrom = starts[index];
     const lineTo = lineFrom + lines[index].length;
+    // Frontmatter is one region: even when the Markdown parser reports inline
+    // code inside it, the whole YAML line stays protected.
+    if (index <= findFrontmatterEnd(lines)) {
+      blankRange(lineFrom, lineTo);
+      continue;
+    }
     // A line that ends a multi-line code span can also hold link syntax; only
     // the code characters are blanked there, never the whole line.
     const touched = usableInline.some(
@@ -1074,7 +1116,22 @@ export function findDocumentFixes(text: string): SourceFix[] {
     if (!touched) blankRange(lineFrom, lineTo);
   }
   const masked = characters.join("");
-  const barriers = [...findDocumentBarriers(masked), ...findCommentRanges(masked)];
+  // Comments: blank code and same-line math tokens first so a `%%` inside them
+  // cannot pair with a real comment opener.
+  const commentChars = masked.split("");
+  const blankComment = (from: number, to: number): void => {
+    for (let index = Math.max(0, from); index < Math.min(commentChars.length, to); index++) {
+      if (commentChars[index] !== "\n") commentChars[index] = " ";
+    }
+  };
+  for (let index = 0; index < lines.length; index++) {
+    const lineText = lines[index].endsWith("\r") ? lines[index].slice(0, -1) : lines[index];
+    for (const token of tokenizePreviewLine(lineText, [])) {
+      blankComment(starts[index] + token.from, starts[index] + token.to);
+    }
+  }
+  const commentView = commentChars.join("");
+  const barriers = [...findDocumentBarriers(masked), ...findCommentRanges(commentView)];
   let lineFrom = 0;
 
   for (let index = 0; index < lines.length; index++) {

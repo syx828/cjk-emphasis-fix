@@ -160,20 +160,26 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
       wikiCandidates.push({ from: link.index, to: link.index + link[0].length });
     }
     const initial = scanPreviewLine(line.text, baseBarriers);
+    // A token that straddles a wiki candidate is not real code/math: the link
+    // owns those characters. Drop such tokens, then keep a candidate unless a
+    // surviving token fully contains it (text inside code is code content).
+    const validTokens = initial.tokens.filter(
+      (token) =>
+        !wikiCandidates.some(
+          (candidate) =>
+            token.from < candidate.to &&
+            candidate.from < token.to &&
+            !(candidate.from <= token.from && token.to <= candidate.to),
+        ),
+    );
     const lineBarriers = [
       ...baseBarriers,
-      ...wikiCandidates.filter((candidate) => {
-        for (const token of initial.tokens) {
-          if (token.from >= candidate.to || candidate.from >= token.to) continue;
-          const candidateInside = token.from <= candidate.from && candidate.to <= token.to;
-          const tokenInside = candidate.from <= token.from && token.to <= candidate.to;
-          // Text inside code/math is that token's content; a partial overlap is
-          // not a wiki link. A token wholly inside the link is fine: the link
-          // owns it and stays a barrier.
-          if (candidateInside || !tokenInside) return false;
-        }
-        return true;
-      }),
+      ...wikiCandidates.filter(
+        (candidate) =>
+          !validTokens.some(
+            (token) => token.from <= candidate.from && candidate.to <= token.to,
+          ),
+      ),
     ];
     const { tokens, matches } = scanPreviewLine(line.text, lineBarriers);
     if (matches.length === 0) continue;
