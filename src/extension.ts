@@ -13,6 +13,7 @@ import {
   findExcessParserRanges,
   findLiteralLines,
   scanPreviewLine,
+  subtractRanges,
   EmphasisMatch,
   ParserEmphasis,
   TextMask,
@@ -93,7 +94,7 @@ function literalLinesFor(doc: Text): boolean[] {
   for (const line of doc.iterLines(1, doc.lines + 1)) {
     lines.push(line);
   }
-  return findLiteralLines(lines);
+  return findLiteralLines(lines, { displayBlocks: "standalone" });
 }
 
 function buildDecorations(view: EditorView, literalLines: boolean[]): DecorationSet {
@@ -175,11 +176,17 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
       line.from,
       line.to,
     );
+    const absoluteBarriers = lineBarriers.map((barrier) => ({
+      from: line.from + barrier.from,
+      to: line.from + barrier.to,
+    }));
     for (const range of excess) {
-      const key = `${range.from}:${range.to}`;
-      if (neutralised.has(key)) continue;
-      neutralised.add(key);
-      decorations.push(plainMark.range(range.from, range.to));
+      for (const segment of subtractRanges(range, absoluteBarriers)) {
+        const key = `${segment.from}:${segment.to}`;
+        if (neutralised.has(key)) continue;
+        neutralised.add(key);
+        decorations.push(plainMark.range(segment.from, segment.to));
+      }
     }
 
     for (const match of matches) {

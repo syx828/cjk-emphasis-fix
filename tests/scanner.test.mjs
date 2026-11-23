@@ -7,6 +7,7 @@ import {
   findExcessParserRanges,
   findLiteralLines,
   tokenizePreviewLine,
+  subtractRanges,
 } from "./scanner.bundle.mjs";
 
 function kinds(text) {
@@ -202,6 +203,30 @@ assert.deepEqual(
 assert.deepEqual(scanPreviewLine("**加粗含 `code` 的文本。**后续").matches.map((match) => match.kind), [
   "strong",
 ]);
+
+// The command keeps its historical display boundaries; preview requires a
+// standalone `$$`.
+assert.equal(findDocumentFixes("$$$\n**字。**后\n").length, 0);
+assert.equal(findDocumentFixes("$$\nb$$\n**字。**后\n").length, 1);
+assert.deepEqual(findLiteralLines(["$$$", "**字。**后"], { displayBlocks: "standalone" }), [
+  false,
+  false,
+]);
+assert.deepEqual(
+  findLiteralLines(["$$", "b$$", "**字。**后"], { displayBlocks: "standalone" }),
+  [true, true, true],
+);
+// Overflow resets stop at barriers.
+assert.deepEqual(
+  subtractRanges({ from: 0, to: 10 }, [{ from: 3, to: 5 }, { from: 7, to: 8 }]),
+  [
+    { from: 0, to: 3 },
+    { from: 5, to: 7 },
+    { from: 8, to: 10 },
+  ],
+);
+// A long token line must not blow the call stack.
+assert.equal(tokenizePreviewLine("$x$".repeat(130000)).length, 130000);
 
 // Entities make the command skip the line instead of splitting `&amp;`.
 assert.equal(findSourceFixes("*字&amp;*后").length, 0);

@@ -478,9 +478,33 @@ export function tokenizePreviewLine(
 
   const tokens: InlineToken[] = [];
   for (const gap of gaps) {
-    tokens.push(...tokenizeGap(text, gap.from, gap.to));
+    for (const token of tokenizeGap(text, gap.from, gap.to)) tokens.push(token);
   }
   return tokens;
+}
+
+export function subtractRanges(
+  range: TextMask,
+  barriers: readonly TextMask[],
+): TextMask[] {
+  let segments: TextMask[] = [range];
+  for (const barrier of mergeRanges(barriers)) {
+    const next: TextMask[] = [];
+    for (const segment of segments) {
+      if (barrier.to <= segment.from || barrier.from >= segment.to) {
+        next.push(segment);
+        continue;
+      }
+      if (barrier.from > segment.from) {
+        next.push({ from: segment.from, to: barrier.from });
+      }
+      if (barrier.to < segment.to) {
+        next.push({ from: barrier.to, to: segment.to });
+      }
+    }
+    segments = next;
+  }
+  return segments.filter((segment) => segment.to > segment.from);
 }
 
 function scanEmphasis(
@@ -517,8 +541,9 @@ export function scanPreviewLine(
   text: string,
   barriers: readonly TextMask[] = [],
 ): { tokens: InlineToken[]; matches: EmphasisMatch[] } {
-  const tokens = tokenizePreviewLine(text, barriers);
-  return { tokens, matches: scanEmphasis(text, tokens, barriers) };
+  const normalized = mergeRanges(barriers);
+  const tokens = tokenizePreviewLine(text, normalized);
+  return { tokens, matches: scanEmphasis(text, tokens, normalized) };
 }
 
 /**
@@ -786,7 +811,20 @@ function stripMathMarkers(line: string): string {
   }
 }
 
-export function findLiteralLines(lines: readonly string[]): boolean[] {
+export interface LiteralOptions {
+  /**
+   * How a `$$` line opens a display block. `legacy` keeps the command's
+   * historical boundary (`$$` prefix, line ending in `$$`); `standalone`
+   * requires a bare `$$` line on both ends and is used by Live Preview.
+   */
+  displayBlocks?: "legacy" | "standalone";
+}
+
+export function findLiteralLines(
+  lines: readonly string[],
+  options: LiteralOptions = {},
+): boolean[] {
+  const standaloneDisplay = (options.displayBlocks ?? "legacy") === "standalone";
   const stripped = lines.map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
   const starts = lineStartsFor(stripped);
   const frontmatterEnd = findFrontmatterEnd(lines);
@@ -840,14 +878,20 @@ export function findLiteralLines(lines: readonly string[]): boolean[] {
   for (let index = 0; index < stripped.length; index++) {
     if (inMathBlock) {
       mathLines[index] = true;
-      if (stripMathMarkers(stripped[index]) === "$$") inMathBlock = false;
+      const closes = standaloneDisplay
+        ? stripMathMarkers(stripped[index]) === "$$"
+        : stripped[index].trimEnd().endsWith("$$");
+      if (closes) inMathBlock = false;
       continue;
     }
     if (parserLiteral[index] || literal[index]) continue;
     const candidate = stripMathMarkers(stripped[index]);
-    // Display math opens only on a standalone `$$` line, the same shape
-    // Obsidian uses for a block; a line such as `$$$a$` is inline text.
-    if (candidate === "$$") {
+    const opens = standaloneDisplay
+      ? candidate === "$$"
+      : candidate.startsWith("$$") && candidate.indexOf("$$", 2) === -1;
+    // In preview a display block opens only on a standalone `$$` line, the
+    // shape Obsidian uses; the command keeps its historical boundaries.
+    if (opens) {
       mathLines[index] = true;
       inMathBlock = true;
     }
