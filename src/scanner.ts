@@ -448,22 +448,27 @@ function indentationColumns(line: string): number {
 }
 
 /**
- * Scan an entire document for CJK emphasis fixes.
+ * Mark the lines whose content is literal text: fenced code, `$$` math blocks
+ * and indented code. Emphasis markers on those lines are content, so neither
+ * the rewrite command nor the Live Preview decorations may touch them.
  *
- * Lines inside fenced code, `$$` math blocks and indented code are content,
- * not prose: their markers are literal and must never be rewritten.
+ * Both call sites share this classifier so a line can never be treated as
+ * prose for rendering but as code for rewriting, or the other way round.
  */
-export function findDocumentFixes(text: string): SourceFix[] {
-  const fixes: SourceFix[] = [];
-  const lines = text.split("\n");
+export function findLiteralLines(lines: readonly string[]): boolean[] {
+  const literal: boolean[] = [];
   let inFence: Fence | null = null;
   let inMathBlock = false;
-  let lineFrom = 0;
+  let inIndentedCode = false;
+  // An indented code block cannot interrupt a paragraph: it needs a blank line
+  // (or the start of the document) before it.
+  let afterBlankLine = true;
 
   for (const lineText of lines) {
     const content = stripBlockquotes(lineText);
     const trimmed = content.trim();
     const indented = indentationColumns(content) >= 4;
+    const blank = trimmed.length === 0;
 
     if (inFence) {
       // A closing fence is only markers plus trailing whitespace, at least as
@@ -473,7 +478,8 @@ export function findDocumentFixes(text: string): SourceFix[] {
       if (closing && closing[1][0] === inFence.character && closing[1].length >= inFence.length) {
         inFence = null;
       }
-      lineFrom += lineText.length + 1;
+      literal.push(true);
+      afterBlankLine = blank;
       continue;
     }
 
@@ -481,14 +487,16 @@ export function findDocumentFixes(text: string): SourceFix[] {
     // content, not the start of a code block.
     if (inMathBlock) {
       if (content.trimEnd().endsWith("$$")) inMathBlock = false;
-      lineFrom += lineText.length + 1;
+      literal.push(true);
+      afterBlankLine = blank;
       continue;
     }
 
     const opening = !indented && content.match(/^ {0,3}(`{3,}|~{3,})/);
     if (opening) {
       inFence = { character: opening[1][0], length: opening[1].length };
-      lineFrom += lineText.length + 1;
+      literal.push(true);
+      afterBlankLine = blank;
       continue;
     }
 
@@ -496,21 +504,48 @@ export function findDocumentFixes(text: string): SourceFix[] {
     // scanner, not a block; only an unclosed opener starts block state.
     if (!indented && trimmed.startsWith("$$") && trimmed.indexOf("$$", 2) === -1) {
       inMathBlock = true;
-      lineFrom += lineText.length + 1;
+      literal.push(true);
+      afterBlankLine = blank;
       continue;
     }
 
-    if (indented) {
-      lineFrom += lineText.length + 1;
+    if (indented && (inIndentedCode || afterBlankLine)) {
+      inIndentedCode = true;
+      literal.push(true);
+      afterBlankLine = blank;
       continue;
     }
 
-    for (const fix of findSourceFixes(lineText)) {
-      fixes.push({
-        from: lineFrom + fix.from,
-        to: lineFrom + fix.to,
-        replacement: fix.replacement,
-      });
+    inIndentedCode = false;
+    literal.push(false);
+    afterBlankLine = blank;
+  }
+
+  return literal;
+}
+
+/**
+ * Scan an entire document for CJK emphasis fixes.
+ *
+ * Lines inside fenced code, `$$` math blocks and indented code are content,
+ * not prose: their markers are literal and must never be rewritten.
+ */
+export function findDocumentFixes(text: string): SourceFix[] {
+  const fixes: SourceFix[] = [];
+  const lines = text.split("\n");
+  const literal = findLiteralLines(lines);
+  let lineFrom = 0;
+
+  for (let index = 0; index < lines.length; index++) {
+    const lineText = lines[index];
+    if (!literal[index]) {
+      for (const fix of findSourceFixes(lineText)) {
+        fixes.push({
+          from: lineFrom + fix.from,
+          to: lineFrom + fix.to,
+          replacement: fix.replacement,
+        });
+      }
     }
     lineFrom += lineText.length + 1;
   }

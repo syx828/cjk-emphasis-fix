@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { scanLine, findSourceFixes, findDocumentFixes, findExcessParserRanges } from "./scanner.bundle.mjs";
+import {
+  scanLine,
+  findSourceFixes,
+  findDocumentFixes,
+  findExcessParserRanges,
+  findLiteralLines,
+} from "./scanner.bundle.mjs";
 
 function kinds(text) {
   return scanLine(text).matches.map((m) => m.kind);
@@ -137,6 +143,24 @@ assert.equal(findDocumentFixes("$$$$\n**字。**后\n").length, 1);
 assert.equal(findDocumentFixes("    $$\n**字。**后\n").length, 1);
 // Backticks inside a math block are content, not a fence opener.
 assert.equal(findDocumentFixes("$$\n```\n$$\n**字。**后\n").length, 1);
+
+// The same classifier drives Live Preview decorations.
+assert.deepEqual(findLiteralLines(["```", "**字。**后", "```", "**字。**后"]), [true, true, true, false]);
+assert.deepEqual(findLiteralLines(["$$", "**字。**后", "$$"]), [true, true, true]);
+assert.deepEqual(findLiteralLines(["    **字。**后", "**字。**后"]), [true, false]);
+// Indented code cannot interrupt a paragraph.
+assert.deepEqual(findLiteralLines(["文字", "    **字。**后"]), [false, false]);
+assert.equal(findDocumentFixes("文字\n    **字。**后\n").length, 1);
+assert.deepEqual(findLiteralLines(["> ```", "> **字。**后", "> ```", "> **字。**后"]), [
+  true,
+  true,
+  true,
+  false,
+]);
+assert.deepEqual(
+  findLiteralLines(["```", "**字。**后", "```x", "**字。**后", "```", "**字。**后"]),
+  [true, true, true, true, true, false],
+);
 
 // Parser runs that overflow a marked span, including split runs.
 assert.deepEqual(findExcessParserRanges([102], [{ from: 23, to: 111 }], 200), [

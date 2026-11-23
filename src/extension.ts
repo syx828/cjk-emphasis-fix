@@ -5,11 +5,16 @@ import {
   DecorationSet,
   EditorView,
 } from "@codemirror/view";
-import { Extension, Prec, Range } from "@codemirror/state";
+import { Extension, Prec, Range, Text } from "@codemirror/state";
 import { syntaxTree } from "@codemirror/language";
 import { editorLivePreviewField } from "obsidian";
 import { getSettings } from "./settings";
-import { findExcessParserRanges, scanLine, EmphasisMatch } from "./scanner";
+import {
+  findExcessParserRanges,
+  findLiteralLines,
+  scanLine,
+  EmphasisMatch,
+} from "./scanner";
 
 interface DocRange {
   from: number;
@@ -61,7 +66,16 @@ function classesFor(kind: EmphasisMatch["kind"]): string[] {
   }
 }
 
-function buildDecorations(view: EditorView): DecorationSet {
+/** Literal-line map for a whole document, computed once per edit. */
+function literalLinesFor(doc: Text): boolean[] {
+  const lines: string[] = [];
+  for (let number = 1; number <= doc.lines; number++) {
+    lines.push(doc.line(number).text);
+  }
+  return findLiteralLines(lines);
+}
+
+function buildDecorations(view: EditorView, literalLines: boolean[]): DecorationSet {
   const settings = getSettings();
   if (!settings.enableLivePreviewFix) return Decoration.none;
 
@@ -93,6 +107,7 @@ function buildDecorations(view: EditorView): DecorationSet {
     const endLine = doc.lineAt(to).number;
 
     for (let lineNumber = startLine; lineNumber <= endLine; lineNumber++) {
+      if (literalLines[lineNumber - 1]) continue;
       const line = doc.line(lineNumber);
       const { matches } = scanLine(line.text);
       if (matches.length === 0) continue;
@@ -142,14 +157,19 @@ function buildDecorations(view: EditorView): DecorationSet {
 const cjkEmphasisViewPlugin = ViewPlugin.fromClass(
   class {
     decorations: DecorationSet;
+    literalLines: boolean[];
 
     constructor(view: EditorView) {
-      this.decorations = buildDecorations(view);
+      this.literalLines = literalLinesFor(view.state.doc);
+      this.decorations = buildDecorations(view, this.literalLines);
     }
 
     update(update: ViewUpdate) {
+      if (update.docChanged) {
+        this.literalLines = literalLinesFor(update.state.doc);
+      }
       if (update.docChanged || update.viewportChanged || update.selectionSet) {
-        this.decorations = buildDecorations(update.view);
+        this.decorations = buildDecorations(update.view, this.literalLines);
       }
     }
   },
