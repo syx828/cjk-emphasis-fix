@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { scanLine, findSourceFixes, findDocumentFixes } from "./scanner.bundle.mjs";
+import { scanLine, findSourceFixes, findDocumentFixes, findExcessParserRanges } from "./scanner.bundle.mjs";
 
 function kinds(text) {
   return scanLine(text).matches.map((m) => m.kind);
@@ -30,6 +30,13 @@ assert.deepEqual(kinds("==hello.==x"), []);
 assert.deepEqual(kinds("`**文字。**x`"), []);
 assert.deepEqual(kinds("$$**文字。**x$$"), []);
 assert.deepEqual(kinds("`==文字。==x`"), []);
+
+// Inline code and math are resolved in source order, so neither syntax can
+// swallow the other's delimiters.
+assert.deepEqual(kinds("`$$`**字。**后$$x$$"), ["strong"]);
+assert.deepEqual(kinds("$$`$$**字。**后`"), ["strong"]);
+assert.deepEqual(scanLine("`**字。**后``").masks, []);
+assert.deepEqual(kinds("`**字。**后``"), ["strong"]);
 
 // Emphasis is allowed to contain inline code. The code span must hide its own
 // delimiters, not split the line in half.
@@ -99,6 +106,31 @@ const document = [
 ].join("\n");
 const documentFixes = findDocumentFixes(document);
 assert.equal(documentFixes.length, 3);
+
+// Blocks whose content is literal text, never rewritten.
+assert.equal(findDocumentFixes("$$\n**字。**后\n$$\n").length, 0);
+assert.equal(findDocumentFixes("    **字。**后\n").length, 0);
+assert.equal(findDocumentFixes("\t**字。**后\n").length, 0);
+assert.equal(findDocumentFixes("```\n**字。**后\n```x\n**字。**后\n```\n").length, 0);
+assert.equal(
+  findDocumentFixes(["```", "**字。**后", "```x", "**字。**后", "```", "**字。**后"].join("\n")).length,
+  1,
+);
+assert.equal(findDocumentFixes("~~~\n**字。**后\n~~~\n").length, 0);
+
+// Parser runs that overflow a marked span, including split runs.
+assert.deepEqual(findExcessParserRanges([102], [{ from: 23, to: 111 }], 200), [
+  { from: 102, to: 111 },
+]);
+assert.deepEqual(
+  findExcessParserRanges([102], [{ from: 23, to: 29 }, { from: 42, to: 111 }], 200),
+  [{ from: 102, to: 111 }],
+);
+assert.deepEqual(findExcessParserRanges([102], [{ from: 102, to: 111 }], 200), [
+  { from: 102, to: 111 },
+]);
+assert.deepEqual(findExcessParserRanges([102], [{ from: 23, to: 100 }], 200), []);
+assert.deepEqual(findExcessParserRanges([102], [{ from: 120, to: 130 }], 200), []);
 
 // Every common Chinese punctuation mark, both for rendering and for the
 // optional source rewrite.

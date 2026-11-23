@@ -9,7 +9,7 @@ import { Extension, Prec, Range } from "@codemirror/state";
 import { syntaxTree } from "@codemirror/language";
 import { editorLivePreviewField } from "obsidian";
 import { getSettings } from "./settings";
-import { scanLine, EmphasisMatch } from "./scanner";
+import { findExcessParserRanges, scanLine, EmphasisMatch } from "./scanner";
 
 interface DocRange {
   from: number;
@@ -102,27 +102,25 @@ function buildDecorations(view: EditorView): DecorationSet {
         (range) => range.from < line.to && range.to > line.from,
       );
 
+      // The parser may style a wider run than the author marked. Several runs
+      // can be involved, so the excess is collected for the whole line first.
+      const excess = findExcessParserRanges(
+        matches.map((match) => line.from + match.to),
+        lineParser,
+        line.to,
+      );
+      for (const range of excess) {
+        const key = `${range.from}:${range.to}`;
+        if (neutralised.has(key)) continue;
+        neutralised.add(key);
+        decorations.push(plainMark.range(range.from, range.to));
+      }
+
       for (const match of matches) {
         const mFrom = line.from + match.from;
         const mTo = line.from + match.to;
         const cFrom = line.from + match.contentFrom;
         const cTo = line.from + match.contentTo;
-
-        // The parser node starts at the content, not at the opening delimiter.
-        // If it reaches past the closing delimiter, the editor is styling
-        // characters the author did not mark.
-        const covering = lineParser.find(
-          (range) => range.from <= cFrom && range.to >= cTo,
-        );
-        if (covering && covering.to > mTo) {
-          const resetFrom = mTo;
-          const resetTo = Math.min(covering.to, line.to);
-          const key = `${resetFrom}:${resetTo}`;
-          if (resetTo > resetFrom && !neutralised.has(key)) {
-            neutralised.add(key);
-            decorations.push(plainMark.range(resetFrom, resetTo));
-          }
-        }
 
         // Always style the content: the syntax tree is not a reliable signal
         // that the editor rendered it, and restyling is harmless.

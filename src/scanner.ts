@@ -59,46 +59,62 @@ function isMarkerAt(text: string, index: number, marker: DelimiterMarker): boole
   return index >= 0 && index < text.length && text[index] === marker;
 }
 
-function findBacktickMasks(text: string): TextMask[] {
-  const masks: TextMask[] = [];
-  let i = 0;
-  while (i < text.length) {
-    if (text[i] !== "`") {
-      i++;
-      continue;
-    }
-    let runEnd = i + 1;
-    while (runEnd < text.length && text[runEnd] === "`") runEnd++;
-    const delimiter = text.slice(i, runEnd);
-    const close = text.indexOf(delimiter, runEnd);
-    if (close === -1) {
-      i = runEnd;
-      continue;
-    }
-    masks.push({ from: i, to: close + delimiter.length });
-    i = close + delimiter.length;
-  }
-  return masks;
+function backtickRunEnd(text: string, start: number): number {
+  let end = start;
+  while (end < text.length && text[end] === "`") end++;
+  return end;
 }
 
-function findDisplayMathMasks(text: string): TextMask[] {
-  const masks: TextMask[] = [];
-  let i = 0;
-  while (i < text.length) {
-    const open = text.indexOf("$$", i);
-    if (open === -1) break;
-    const close = text.indexOf("$$", open + 2);
-    if (close === -1) break;
-    masks.push({ from: open, to: close + 2 });
-    i = close + 2;
+/** End of the first backtick run after `start` whose length matches exactly. */
+function closingBacktickRunEnd(text: string, start: number, length: number): number {
+  let cursor = start;
+  while (cursor < text.length) {
+    const runStart = text.indexOf("`", cursor);
+    if (runStart === -1) return -1;
+    const runEnd = backtickRunEnd(text, runStart);
+    if (runEnd - runStart === length) return runEnd;
+    cursor = runEnd;
   }
-  return masks;
+  return -1;
 }
 
+/**
+ * Inline code and `$$` math masks, found in source order.
+ *
+ * One pass, because each syntax can contain the other's delimiters: in
+ * `` `$$` `` the dollars are code, in `$$ `$$` ` the backticks are math.
+ * Whichever opens first owns its delimiters, which two independent scans got
+ * wrong. A code span also has to close on a backtick run of exactly the same
+ * length, as CommonMark requires.
+ */
 export function findMasks(text: string): TextMask[] {
-  return [...findBacktickMasks(text), ...findDisplayMathMasks(text)].sort(
-    (a, b) => a.from - b.from,
-  );
+  const masks: TextMask[] = [];
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] === "`") {
+      const runEnd = backtickRunEnd(text, i);
+      const close = closingBacktickRunEnd(text, runEnd, runEnd - i);
+      if (close === -1) {
+        i = runEnd;
+        continue;
+      }
+      masks.push({ from: i, to: close });
+      i = close;
+      continue;
+    }
+    if (text[i] === "$" && text[i + 1] === "$") {
+      const close = text.indexOf("$$", i + 2);
+      if (close === -1) {
+        i += 2;
+        continue;
+      }
+      masks.push({ from: i, to: close + 2 });
+      i = close + 2;
+      continue;
+    }
+    i++;
+  }
+  return masks;
 }
 
 function isMasked(position: number, masks: TextMask[]): boolean {
@@ -356,40 +372,93 @@ export function findSourceFixes(text: string): SourceFix[] {
 }
 
 /**
+ * Parser emphasis that reaches past an intended closing delimiter.
+ *
+ * A parser run that starts inside or before the span and ends after the
+ * delimiter styles characters the author did not mark. Several runs may cover
+ * the same span, so every one of them is considered instead of only the first
+ * range that happens to cover the whole content.
+ */
+export function findExcessParserRanges(
+  matchEnds: readonly number[],
+  parserRanges: readonly TextMask[],
+  lineTo: number,
+): TextMask[] {
+  const excess: TextMask[] = [];
+  for (const matchEnd of matchEnds) {
+    for (const range of parserRanges) {
+      if (range.to <= matchEnd || range.from > matchEnd) continue;
+      const from = Math.max(matchEnd, range.from);
+      const to = Math.min(range.to, lineTo);
+      if (to > from) excess.push({ from, to });
+    }
+  }
+  return excess;
+}
+
+interface Fence {
+  character: string;
+  length: number;
+}
+
+/**
  * Scan an entire document for CJK emphasis fixes.
- * Skips fenced code blocks so inline markers inside code are never touched.
+ *
+ * Lines inside fenced code, `$$` math blocks and indented code are content,
+ * not prose: their markers are literal and must never be rewritten.
  */
 export function findDocumentFixes(text: string): SourceFix[] {
   const fixes: SourceFix[] = [];
   const lines = text.split("\n");
-  let inFence: string | null = null;
+  let inFence: Fence | null = null;
+  let inMathBlock = false;
   let lineFrom = 0;
 
-  for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
-    const lineText = lines[lineIndex];
-    const lineLeading = lineText.match(/^(\s*)/)?.[1] ?? "";
-
-    const fenceMatch = lineText.slice(lineLeading.length).match(/^(`{3,}|~{3,})/);
-    if (fenceMatch) {
-      const fence = fenceMatch[1];
-      if (!inFence) {
-        inFence = fence;
-        lineFrom += lineText.length + 1;
-        continue;
-      } else if (fence[0] === inFence[0] && fence.length >= inFence.length) {
+  for (const lineText of lines) {
+    if (inFence) {
+      // A closing fence is only backticks or tildes plus trailing whitespace,
+      // at least as long as the opener. "```text" inside a block is content.
+      const closing = lineText.match(/^\s{0,3}(`{3,}|~{3,})\s*$/);
+      if (closing && closing[1][0] === inFence.character && closing[1].length >= inFence.length) {
         inFence = null;
-        lineFrom += lineText.length + 1;
-        continue;
       }
+      lineFrom += lineText.length + 1;
+      continue;
     }
-    if (!inFence) {
-      for (const fix of findSourceFixes(lineText)) {
-        fixes.push({
-          from: lineFrom + fix.from,
-          to: lineFrom + fix.to,
-          replacement: fix.replacement,
-        });
-      }
+
+    const opening = lineText.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (opening) {
+      inFence = { character: opening[1][0], length: opening[1].length };
+      lineFrom += lineText.length + 1;
+      continue;
+    }
+
+    if (inMathBlock) {
+      if (lineText.trimEnd().endsWith("$$")) inMathBlock = false;
+      lineFrom += lineText.length + 1;
+      continue;
+    }
+
+    const trimmed = lineText.trim();
+    if (trimmed.startsWith("$$")) {
+      // `$$x$$` on one line is handled by the per-line masks; a lone `$$`
+      // opens a block that continues until a line closing with `$$`.
+      if (!(trimmed.length > 4 && trimmed.endsWith("$$"))) inMathBlock = true;
+      lineFrom += lineText.length + 1;
+      continue;
+    }
+
+    if (/^(\t| {4,})/.test(lineText)) {
+      lineFrom += lineText.length + 1;
+      continue;
+    }
+
+    for (const fix of findSourceFixes(lineText)) {
+      fixes.push({
+        from: lineFrom + fix.from,
+        to: lineFrom + fix.to,
+        replacement: fix.replacement,
+      });
     }
     lineFrom += lineText.length + 1;
   }
