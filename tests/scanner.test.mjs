@@ -414,7 +414,19 @@ assert.equal(findDocumentFixes("<div>\n**字。**后\n</div>\n\n**字。**后\n"
 // CRLF line endings.
 assert.equal(findDocumentFixes("~~~\r\nx\r\n~~~\r\n**字。**后").length, 1);
 
-// Parser runs that overflow a marked span, including split runs.
+// Obsidian reports emphasis inside a link as `em_link` spanning up to the
+// trailing text; that tail must be neutralised.
+assert.deepEqual(
+  findExcessParserRanges(
+    [{ to: 5, delimiterLength: 1, kind: "em" }],
+    [{ from: 2, to: 6, kind: "em" }],
+    "xxxxx",
+    0,
+    10,
+  ),
+  [{ from: 5, to: 6 }],
+);
+
 const overflowText = "x".repeat(200);
 assert.deepEqual(
   findExcessParserRanges([{ to: 102, delimiterLength: 2 }], [{ from: 23, to: 111 }], overflowText, 0, 200),

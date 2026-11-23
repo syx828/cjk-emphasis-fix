@@ -35,11 +35,14 @@ function parserEmphasisKind(name: string): EmphasisMatch["kind"] | null {
   if (lower.includes("formatting") || lower.includes("mark") || CONTAINER_NODE.test(lower)) {
     return null;
   }
+  // Obsidian names emphasis inside a link `em_link` / `strong_link`.
+  if (lower.startsWith("em_") || lower === "em" || lower.includes("emphasis") || lower.includes("italic")) {
+    return "em";
+  }
   if (lower.includes("strongem") || lower.includes("strong-em")) return "strong-em";
-  if (lower.includes("strong")) return "strong";
+  if (lower.startsWith("strong") || lower.includes("bold")) return "strong";
   if (lower.includes("strikethrough") || lower.includes("strike")) return "strike";
   if (lower.includes("highlight")) return "highlight";
-  if (lower === "em" || lower.includes("emphasis")) return "em";
   return null;
 }
 

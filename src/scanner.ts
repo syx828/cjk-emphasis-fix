@@ -730,9 +730,8 @@ export function findExcessParserRanges(
   const excess: TextMask[] = [];
   for (const match of matches) {
     for (const range of parserRanges) {
-      if (range.kind !== undefined && match.kind !== undefined && range.kind !== match.kind) {
-        continue;
-      }
+      // Any parser run that overlaps the intended content and reaches past the
+      // closer is overflow, whatever its node is called.
       if (range.to <= match.to) continue;
       const to = Math.min(range.to, lineTo);
       if (to <= match.to) continue;
@@ -743,8 +742,17 @@ export function findExcessParserRanges(
       }
 
       // Started at or after the closer: only treat it as overflow when it
-      // begins inside the closing marker run itself.
+      // begins inside the closing marker run itself and is the same kind of
+      // emphasis. A different kind here is a separate construct such as
+      // `**字**_x_`.
       if (range.from > match.to + match.delimiterLength) continue;
+      if (
+        range.kind !== undefined &&
+        match.kind !== undefined &&
+        range.kind !== match.kind
+      ) {
+        continue;
+      }
       const gap = lineText.slice(match.to - lineFrom, range.from - lineFrom);
       if (/\s/.test(gap)) continue;
       if (range.from < to) excess.push({ from: range.from, to });
