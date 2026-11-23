@@ -143,6 +143,10 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
   for (const lineNumber of visibleLines) {
     if (literalLines[lineNumber - 1]) continue;
     const line = doc.line(lineNumber);
+    // Dollar math and currency share the same character; pairing them reliably
+    // needs an inline parser, so such lines are left undecorated. This avoids
+    // hiding prose next to math at the cost of a repair on those lines.
+    if (line.text.includes("$")) continue;
     // Table rows are rendered by a widget; decorating them would compete with
     // the cell layout. Require a leading and trailing pipe so ordinary prose
     // that happens to start with "|" is not skipped.
