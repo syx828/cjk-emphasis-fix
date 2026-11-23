@@ -155,7 +155,7 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
     while ((link = wikilink.exec(line.text)) !== null) {
       lineBarriers.push({ from: link.index, to: link.index + link[0].length });
     }
-    const { matches } = scanPreviewLine(line.text, lineBarriers);
+    const { tokens, matches } = scanPreviewLine(line.text, lineBarriers);
     if (matches.length === 0) continue;
 
     const cursorOnLine = cursorHead >= line.from && cursorHead <= line.to;
@@ -180,8 +180,17 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
       from: line.from + barrier.from,
       to: line.from + barrier.to,
     }));
+    const absoluteTokens = tokens.map((token) => ({
+      from: line.from + token.from,
+      to: line.from + token.to,
+    }));
+    const contentRanges = matches.map((match) => ({
+      from: line.from + match.contentFrom,
+      to: line.from + match.contentTo,
+    }));
+    const resetBarriers = [...absoluteBarriers, ...absoluteTokens, ...contentRanges];
     for (const range of excess) {
-      for (const segment of subtractRanges(range, absoluteBarriers)) {
+      for (const segment of subtractRanges(range, resetBarriers)) {
         const key = `${segment.from}:${segment.to}`;
         if (neutralised.has(key)) continue;
         neutralised.add(key);

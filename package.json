@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production",
-    "test": "node tests/scanner.test.mjs",
+    "test": "esbuild src/scanner.ts --bundle --format=esm --outfile=tests/scanner.bundle.mjs && node tests/scanner.test.mjs",
     "lint": "eslint src"
   },
   "keywords": [

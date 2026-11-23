@@ -228,7 +228,19 @@ assert.deepEqual(
 // A long token line must not blow the call stack.
 assert.equal(tokenizePreviewLine("$x$".repeat(130000)).length, 130000);
 
-// Entities make the command skip the line instead of splitting `&amp;`.
+// Command must not edit literal math, link metadata, nested delimiters or
+// Obsidian comments, and must recognize a BOM before frontmatter.
+assert.equal(findDocumentFixes("$$\n```\n$$\n$$\n*字。*后\n$$\n").length, 0);
+assert.equal(findDocumentFixes("---\nx: |\n  ```\n---\n$$\n*字。*后\n$$\n").length, 0);
+assert.equal(findDocumentFixes("[a](\n*字。*后\n)\n").length, 0);
+assert.equal(findDocumentFixes("[a]: u\n  \"*字。*后\"\n").length, 0);
+assert.equal(findDocumentFixes("*字 _甲_。*后\n").length, 0);
+assert.equal(findDocumentFixes("%%*字。*后%%\n").length, 0);
+assert.equal(
+  findDocumentFixes("\uFEFF---\na: \"*字。*后\"\n---\n**字。**后\n").length,
+  1,
+);
+
 assert.equal(findSourceFixes("*字&amp;*后").length, 0);
 assert.equal(findSourceFixes("*字&#65;*后").length, 0);
 // Frontmatter is searched without a line limit.

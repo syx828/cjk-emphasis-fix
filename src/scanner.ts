@@ -516,7 +516,9 @@ function scanEmphasis(
   const consumed: TextMask[] = [];
   const matches: EmphasisMatch[] = [];
   for (const pass of SCAN_PASSES) {
-    matches.push(...scanWithRegex(text, scannable, pass, consumed, barriers));
+    for (const match of scanWithRegex(text, scannable, pass, consumed, barriers)) {
+      matches.push(match);
+    }
   }
   return matches.sort((a, b) => a.from - b.from);
 }
@@ -565,6 +567,10 @@ export function trailingPunctuationLength(text: string, from: number, to: number
   while (cursor > from) {
     const code = codePointBefore(text, cursor);
     if (code === undefined || !isPunctuation(code)) break;
+    // Underscores and asterisks are emphasis delimiters, not prose
+    // punctuation. Moving an inner `_` across the outer marker would break
+    // the nested span, so the walk stops there.
+    if (code === 0x5f || code === 0x2a) break;
     cursor -= code > 0xffff ? 2 : 1;
   }
   return to - cursor;
@@ -635,7 +641,7 @@ export function findSourceFixes(text: string): SourceFix[] {
   // attribute value, a comment), so the whole line is skipped. Inline code and
   // `$$` spans are masked first, so their content does not trip the check.
   const gate = maskDelimiters(text, findMasks(text));
-  if (/[\][<!$&|]/.test(gate)) return [];
+  if (/[\][<!$&|%]/.test(gate)) return [];
 
   const { matches, masks } = scanLine(text);
   const fixes: SourceFix[] = [];
@@ -655,6 +661,9 @@ export function findSourceFixes(text: string): SourceFix[] {
     // would rewrite what the code span contains.
     if (overlapsAnyMask(masks, punctuationFrom, match.contentTo)) continue;
     if (contentWithoutPunctuation.length === 0) continue;
+    // Moving the closer past a nested underscore delimiter would change which
+    // marker owns the inner span; leave such lines alone.
+    if (contentWithoutPunctuation.includes("_")) continue;
     if (containsOpenedPair(contentWithoutPunctuation, punctuation)) continue;
 
     const delimiter = text.slice(match.from, match.contentFrom);
@@ -778,7 +787,7 @@ function markLines(
 /** YAML frontmatter: `---` on line one, a closing delimiter without a limit. */
 function findFrontmatterEnd(lines: readonly string[]): number {
   if (lines.length === 0) return -1;
-  if (lines[0].replace(/\r$/, "") !== "---") return -1;
+  if (lines[0].replace(/\r$/, "").replace(/^\uFEFF/, "") !== "---") return -1;
   const limit = lines.length;
   for (let index = 1; index < limit; index++) {
     const line = lines[index].replace(/\r$/, "").trim();
@@ -871,41 +880,10 @@ export function findLiteralLines(
     for (let index = first; index <= last; index++) literal[index] = true;
   }
 
-  // `$$` blocks are Obsidian syntax the parser does not know; find them line by
-  // line, skipping anything already known to be code or frontmatter.
-  const mathLines = new Array<boolean>(lines.length).fill(false);
-  let inMathBlock = false;
-  for (let index = 0; index < stripped.length; index++) {
-    if (inMathBlock) {
-      mathLines[index] = true;
-      const closes = standaloneDisplay
-        ? stripMathMarkers(stripped[index]) === "$$"
-        : stripped[index].trimEnd().endsWith("$$");
-      if (closes) inMathBlock = false;
-      continue;
-    }
-    if (parserLiteral[index] || literal[index]) continue;
-    const candidate = stripMathMarkers(stripped[index]);
-    const opens = standaloneDisplay
-      ? candidate === "$$"
-      : candidate.startsWith("$$") && candidate.indexOf("$$", 2) === -1;
-    // In preview a display block opens only on a standalone `$$` line, the
-    // shape Obsidian uses; the command keeps its historical boundaries.
-    if (opens) {
-      mathLines[index] = true;
-      inMathBlock = true;
-    }
-  }
-  for (let index = 0; index < mathLines.length; index++) {
-    if (mathLines[index]) literal[index] = true;
-  }
-
-  // Parse again with frontmatter, math and multi-line code blanked out. Without
-  // this, a fence inside those regions changes how the parser reads the rest of
-  // the document and hides real prose behind a phantom block. Only the literal
-  // ranges are blanked, never whole lines: blanking a line that merely contains
-  // a code span would also erase a list marker or a quote marker and change how
-  // the second parse reads the fences around it.
+  // `$$` blocks are Obsidian syntax the parser does not know. They are found
+  // line by line, and the document is reparsed after blanking them so a fence
+  // inside math or frontmatter cannot suppress a later opener. The loop runs
+  // until neither parse adds a new literal line.
   const characters = stripped.join("\n").split("");
   const blankRange = (from: number, to: number) => {
     for (let index = Math.max(0, from); index < Math.min(characters.length, to); index++) {
@@ -915,32 +893,73 @@ export function findLiteralLines(
   for (let index = 0; index <= frontmatterEnd && index < stripped.length; index++) {
     blankRange(starts[index], starts[index] + stripped[index].length);
   }
-  for (let index = 0; index < mathLines.length; index++) {
-    if (mathLines[index]) {
-      blankRange(starts[index], starts[index] + stripped[index].length);
-    }
-  }
   for (const node of parsed.inlineNodes) {
     const first = lineIndexAt(starts, node.from);
     const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
     if (first !== last) blankRange(node.from, node.to);
   }
 
-  const reparsed = parse(characters.join(""));
-  const blockLiteral = new Array<boolean>(lines.length).fill(false);
-  for (const node of reparsed.blockNodes) {
-    markLines(blockLiteral, starts, node.from, node.to);
-  }
-  for (let index = 0; index < literal.length; index++) {
-    if (blockLiteral[index]) literal[index] = true;
-  }
-  for (const node of reparsed.inlineNodes) {
-    const first = lineIndexAt(starts, node.from);
-    const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
-    if (first === last) continue;
-    for (let index = first; index <= last; index++) literal[index] = true;
+  const scanMath = (blockLiteral: readonly boolean[]): boolean[] => {
+    const math = new Array<boolean>(lines.length).fill(false);
+    let inMathBlock = false;
+    for (let index = 0; index < stripped.length; index++) {
+      if (inMathBlock) {
+        math[index] = true;
+        const closes = standaloneDisplay
+          ? stripMathMarkers(stripped[index]) === "$$"
+          : stripped[index].trimEnd().endsWith("$$");
+        if (closes) inMathBlock = false;
+        continue;
+      }
+      if (blockLiteral[index] || literal[index]) continue;
+      const candidate = stripMathMarkers(stripped[index]);
+      const opens = standaloneDisplay
+        ? candidate === "$$"
+        : candidate.startsWith("$$") && candidate.indexOf("$$", 2) === -1;
+      if (opens) {
+        math[index] = true;
+        inMathBlock = true;
+      }
+    }
+    return math;
+  };
+
+  let blockLiteral: boolean[] = parserLiteral;
+  for (let pass = 0; pass < 3; pass++) {
+    let added = false;
+    const math = scanMath(blockLiteral);
+    for (let index = 0; index < math.length; index++) {
+      if (math[index] && !literal[index]) {
+        literal[index] = true;
+        blankRange(starts[index], starts[index] + stripped[index].length);
+        added = true;
+      }
+    }
+
+    const reparsed = parse(characters.join(""));
+    const nextBlock = new Array<boolean>(lines.length).fill(false);
+    for (const node of reparsed.blockNodes) {
+      markLines(nextBlock, starts, node.from, node.to);
+    }
+    let blockChanged = false;
+    for (let index = 0; index < nextBlock.length; index++) {
+      if (nextBlock[index] !== blockLiteral[index]) blockChanged = true;
+      if (nextBlock[index] && !literal[index]) {
+        literal[index] = true;
+        added = true;
+      }
+    }
+    for (const node of reparsed.inlineNodes) {
+      const first = lineIndexAt(starts, node.from);
+      const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
+      if (first === last) continue;
+      for (let index = first; index <= last; index++) literal[index] = true;
+    }
+    blockLiteral = nextBlock;
+    if (!added && !blockChanged) break;
   }
 
+  return literal;
   return literal;
 }
 
@@ -950,10 +969,26 @@ export function findLiteralLines(
  * Lines inside fenced code, `$$` math blocks and indented code are content,
  * not prose: their markers are literal and must never be rewritten.
  */
+const DOCUMENT_BARRIER_NODES = new Set(["URL", "LinkTitle", "HTMLTag", "Comment", "Entity"]);
+
+/** Syntax ranges the command must not edit, even on a line that looks prose. */
+function findDocumentBarriers(text: string): TextMask[] {
+  const barriers: TextMask[] = [];
+  markdownParser.parse(text).iterate({
+    enter(node) {
+      if (DOCUMENT_BARRIER_NODES.has(node.name)) {
+        barriers.push({ from: node.from, to: node.to });
+      }
+    },
+  });
+  return barriers;
+}
+
 export function findDocumentFixes(text: string): SourceFix[] {
   const fixes: SourceFix[] = [];
   const lines = text.split("\n");
   const literal = findLiteralLines(lines);
+  const barriers = findDocumentBarriers(text);
   let lineFrom = 0;
 
   for (let index = 0; index < lines.length; index++) {
@@ -961,11 +996,12 @@ export function findDocumentFixes(text: string): SourceFix[] {
     const lineText = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
     if (!literal[index]) {
       for (const fix of findSourceFixes(lineText)) {
-        fixes.push({
-          from: lineFrom + fix.from,
-          to: lineFrom + fix.to,
-          replacement: fix.replacement,
-        });
+        const from = lineFrom + fix.from;
+        const to = lineFrom + fix.to;
+        if (barriers.some((barrier) => barrier.from < to && from < barrier.to)) {
+          continue;
+        }
+        fixes.push({ from, to, replacement: fix.replacement });
       }
     }
     lineFrom += raw.length + 1;
