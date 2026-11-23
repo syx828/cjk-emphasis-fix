@@ -852,21 +852,37 @@ function mathOpenBefore(
   return open;
 }
 
-/** End offset of the display-math block that owns `first`. */
-function mathEndOffset(
+/** End offset of the display-math block enclosing each line, or -1. */
+function mathBlockEnds(
   lines: readonly string[],
   starts: readonly number[],
-  first: number,
   standalone: boolean,
-): number {
-  for (let index = first; index < lines.length; index++) {
+): number[] {
+  const ends = new Array<number>(lines.length).fill(-1);
+  let start = -1;
+  for (let index = 0; index < lines.length; index++) {
     const candidate = stripMathMarkers(lines[index].replace(/\r$/, ""));
     const closes = standalone
       ? candidate === "$$"
       : candidate.trimEnd().endsWith("$$");
-    if (closes) return starts[index] + lines[index].length;
+    const opens = standalone
+      ? candidate === "$$"
+      : candidate.startsWith("$$") && candidate.indexOf("$$", 2) === -1;
+    if (start === -1) {
+      if (opens) start = index;
+      continue;
+    }
+    if (closes) {
+      const end = starts[index] + lines[index].length;
+      for (let line = start; line <= index; line++) ends[line] = end;
+      start = -1;
+    }
   }
-  return starts[lines.length - 1] + lines[lines.length - 1].length;
+  if (start !== -1) {
+    const end = starts[lines.length - 1] + lines[lines.length - 1].length;
+    for (let line = start; line < lines.length; line++) ends[line] = end;
+  }
+  return ends;
 }
 
 function startsInsideDisplayMath(
@@ -939,7 +955,11 @@ export function findLiteralLines(
   // Inline code that spans lines makes every line it touches literal. A span
   // on one line is handled by the per-line masks. Spans that start inside an
   // open display block are math content, not code.
-  const mathOpen = mathOpenBefore(stripped, standaloneDisplay, parserLiteral);
+  const mathSkip = parserLiteral.map(
+    (value, index) => value || index <= frontmatterEnd,
+  );
+  const mathOpen = mathOpenBefore(stripped, standaloneDisplay, mathSkip);
+  const blockEnds = mathBlockEnds(stripped, starts, standaloneDisplay);
   for (const node of parsed.inlineNodes) {
     const first = lineIndexAt(starts, node.from);
     const column = node.from - starts[first];
@@ -969,7 +989,8 @@ export function findLiteralLines(
       // This "code span" starts inside math, so only the part up to the end of
       // that math block belongs to math. The closing backtick may be a real
       // opener in the prose that follows.
-      blankRange(node.from, mathEndOffset(stripped, starts, first, standaloneDisplay));
+      const blockEnd = blockEnds[first] >= 0 ? blockEnds[first] : node.to;
+      blankRange(node.from, Math.min(node.to, blockEnd));
       continue;
     }
     const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
@@ -1122,7 +1143,8 @@ export function findDocumentFixes(text: string): SourceFix[] {
         node.name === "HTMLTag" ||
         node.name === "Comment" ||
         node.name === "CommentBlock" ||
-        node.name === "Entity"
+        node.name === "Entity" ||
+        node.name === "InlineCode"
       ) {
         markLines(protectedLines, starts, node.from, node.to);
       }
@@ -1138,7 +1160,12 @@ export function findDocumentFixes(text: string): SourceFix[] {
       }
     },
   });
-  const mathOpen = mathOpenBefore(lines, false, blockLiteral);
+  const frontmatterEnd = findFrontmatterEnd(lines);
+  const mathSkip = blockLiteral.map(
+    (value, index) => value || index <= frontmatterEnd,
+  );
+  const mathOpen = mathOpenBefore(lines, false, mathSkip);
+  const blockEnds = mathBlockEnds(lines, starts, false);
   const usableInline: TextMask[] = [];
   const characters = text.split("");
   const blankRange = (from: number, to: number): void => {
@@ -1152,7 +1179,8 @@ export function findDocumentFixes(text: string): SourceFix[] {
     if (startsInsideDisplayMath(lines, mathOpen, first, column, false)) {
       // Math content only up to the end of that math block; the closing
       // backtick can be a real code opener in the following prose.
-      blankRange(range.from, mathEndOffset(lines, starts, first, false));
+      const blockEnd = blockEnds[first] >= 0 ? blockEnds[first] : range.to;
+      blankRange(range.from, Math.min(range.to, blockEnd));
       continue;
     }
     usableInline.push(range);
@@ -1164,7 +1192,7 @@ export function findDocumentFixes(text: string): SourceFix[] {
     const lineTo = lineFrom + lines[index].length;
     // Frontmatter is one region: even when the Markdown parser reports inline
     // code inside it, the whole YAML line stays protected.
-    if (index <= findFrontmatterEnd(lines)) {
+    if (index <= frontmatterEnd) {
       blankRange(lineFrom, lineTo);
       continue;
     }
@@ -1209,6 +1237,9 @@ export function findDocumentFixes(text: string): SourceFix[] {
     for (const token of tokenizePreviewLine(lineText, lineBarriers)) {
       blankComment(lineFrom + token.from, lineFrom + token.to);
     }
+  }
+  for (const barrier of documentBarriers) {
+    blankComment(barrier.from, barrier.to);
   }
   const commentView = commentChars.join("");
   const barriers = [...documentBarriers, ...findCommentRanges(commentView)];

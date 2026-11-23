@@ -163,7 +163,10 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
     const filteredBase = baseBarriers.filter(
       (barrier) =>
         !rawTokens.some(
-          (token) => token.from <= barrier.from && barrier.to <= token.to,
+          (token) =>
+            token.kind === "code" &&
+            token.from <= barrier.from &&
+            barrier.to <= token.to,
         ),
     );
     const initial = scanPreviewLine(line.text, filteredBase);
