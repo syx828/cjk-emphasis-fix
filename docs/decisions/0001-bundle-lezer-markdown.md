@@ -152,6 +152,20 @@ Related code: `src/scanner.ts` (`findLiteralLines`, `findDocumentFixes`),
   nested bold/italic. A preview change that scanned prose after multi-line
   code was reverted after review: code ranges must come from the same literal
   analysis that knows math ownership.
+- 2026-11-23 (0.4.9): Live Preview repairs prose that follows a multi-line
+  inline code span. The classifier now yields one final, non-overlapping range
+  set shared by math exclusion, wiki classification and decorations; candidates
+  are resolved once in source order against accepted code, frontmatter, display
+  and inline math, and wiki barriers, and reparsed nodes follow the same rules.
+  Backticks owned by math and openers with an earlier confirmed closer are
+  resolved before Lezer pairs delimiters, and fenced/indented/HTML/comment
+  blocks break pending inline state. Inside an accepted span a backslash no
+  longer escapes the closer, while an escaped opener remains prose. Measured
+  median analysis: 1k/2k/4k multi-line spans 7/12/25 ms, 2k/4k/8k linked lines
+  14/42/144 ms. Oracle returned ship after the frozen matrix passed; the user's
+  Obsidian check confirmed `字。` renders italic. Live Preview keeps the source
+  line break inside a code span where Reading view renders a space; that
+  difference is outside the plugin's rendering contract.
 
 
 
