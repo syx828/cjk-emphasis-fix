@@ -146,6 +146,12 @@ Related code: `src/scanner.ts` (`findLiteralLines`, `findDocumentFixes`),
   syntax (any of `[ ] < ! $ | % &` or a backtick) is refused as a whole, and
   the setting stays off by default. Live Preview keeps the tokenizer described
   above. Oracle returned ship for this release candidate.
+- 2026-11-23 (0.4.8): Obsidian reports emphasis inside a link label as
+  `em_link`; neutralisation now recognises the prefix (and `strong_`) and keeps
+  the same-kind guard, so the run's trailing text is reset without flattening
+  nested bold/italic. A preview change that scanned prose after multi-line
+  code was reverted after review: code ranges must come from the same literal
+  analysis that knows math ownership.
 
 
 
