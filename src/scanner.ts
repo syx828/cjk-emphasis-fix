@@ -242,8 +242,37 @@ function scanWithRegex(
     const contentTo = to - pass.delimiterLength;
 
     // A backslash-escaped marker is literal text, not a delimiter.
-    if (isEscaped(text, from) || isEscaped(text, contentTo)) {
+    if (isEscaped(text, from)) {
       expression.lastIndex = from + 1;
+      continue;
+    }
+    if (isEscaped(text, contentTo)) {
+      // The marker the pattern picked is escaped; keep the opener and look for
+      // the next real closer, as in `*中\*文。*续`.
+      const closerStart = findNextDelimiter(
+        text,
+        pass.marker,
+        pass.delimiterLength,
+        to,
+      );
+      if (closerStart === -1) {
+        expression.lastIndex = from + 1;
+        continue;
+      }
+      const escapedCandidate = isValidCandidate(
+        text,
+        from,
+        closerStart + pass.delimiterLength,
+        contentFrom,
+        closerStart,
+        pass,
+      );
+      if (escapedCandidate && canOpenEmphasis(text, from, pass.delimiterLength)) {
+        matches.push(escapedCandidate);
+        consumed.push({ from, to: closerStart + pass.delimiterLength });
+      } else {
+        expression.lastIndex = from + 1;
+      }
       continue;
     }
 
@@ -262,8 +291,33 @@ function scanWithRegex(
   return matches;
 }
 
-export function scanLine(text: string): { matches: EmphasisMatch[]; masks: TextMask[] } {
-  const masks = findMasks(text);
+/** Start of the next unescaped marker run of exactly `length`. */
+function findNextDelimiter(
+  text: string,
+  marker: DelimiterMarker,
+  length: number,
+  fromIndex: number,
+): number {
+  let index = fromIndex;
+  while (index < text.length) {
+    if (text[index] !== marker) {
+      index++;
+      continue;
+    }
+    const runStart = index;
+    let runEnd = runStart;
+    while (runEnd < text.length && text[runEnd] === marker) runEnd++;
+    if (runEnd - runStart === length && !isEscaped(text, runStart)) return runStart;
+    index = runEnd;
+  }
+  return -1;
+}
+
+export function scanLine(
+  text: string,
+  extraMasks: readonly TextMask[] = [],
+): { matches: EmphasisMatch[]; masks: TextMask[] } {
+  const masks = [...findMasks(text), ...extraMasks].sort((a, b) => a.from - b.from);
   const scannable = maskDelimiters(text, masks);
   const consumed: TextMask[] = [];
   const matches: EmphasisMatch[] = [];
@@ -543,7 +597,20 @@ function stripMathMarkers(line: string): string {
   }
 }
 
-export function findLiteralLines(lines: readonly string[]): boolean[] {
+export interface LiteralOptions {
+  /**
+   * Treat lines touched by a multi-line inline code span as literal. The
+   * command needs this; Live Preview handles the same span with masks instead
+   * so the rest of the line can still be decorated.
+   */
+  multilineCode?: boolean;
+}
+
+export function findLiteralLines(
+  lines: readonly string[],
+  options: LiteralOptions = {},
+): boolean[] {
+  const markMultilineCode = options.multilineCode ?? true;
   const stripped = lines.map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
   const starts = lineStartsFor(stripped);
   const frontmatterEnd = findFrontmatterEnd(lines);
@@ -553,7 +620,12 @@ export function findLiteralLines(lines: readonly string[]): boolean[] {
     const inlineNodes: TextMask[] = [];
     markdownParser.parse(text).iterate({
       enter(node) {
-        if (node.name === "FencedCode" || node.name === "CodeBlock" || node.name === "HTMLBlock") {
+        if (
+          node.name === "FencedCode" ||
+          node.name === "CodeBlock" ||
+          node.name === "HTMLBlock" ||
+          node.name === "CommentBlock"
+        ) {
           blockNodes.push({ from: node.from, to: node.to });
           return;
         }
@@ -579,6 +651,7 @@ export function findLiteralLines(lines: readonly string[]): boolean[] {
   // Inline code that spans lines makes every line it touches literal. A span
   // on one line is handled by the per-line masks.
   for (const node of parsed.inlineNodes) {
+    if (!markMultilineCode) break;
     const first = lineIndexAt(starts, node.from);
     const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
     if (first === last) continue;
@@ -642,11 +715,13 @@ export function findLiteralLines(lines: readonly string[]): boolean[] {
   for (let index = 0; index < literal.length; index++) {
     if (blockLiteral[index]) literal[index] = true;
   }
-  for (const node of reparsed.inlineNodes) {
-    const first = lineIndexAt(starts, node.from);
-    const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
-    if (first === last) continue;
-    for (let index = first; index <= last; index++) literal[index] = true;
+  if (markMultilineCode) {
+    for (const node of reparsed.inlineNodes) {
+      const first = lineIndexAt(starts, node.from);
+      const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
+      if (first === last) continue;
+      for (let index = first; index <= last; index++) literal[index] = true;
+    }
   }
 
   return literal;

@@ -15,6 +15,7 @@ import {
   scanLine,
   EmphasisMatch,
   ParserEmphasis,
+  TextMask,
 } from "./scanner";
 
 /**
@@ -71,13 +72,28 @@ function classesFor(kind: EmphasisMatch["kind"]): string[] {
   }
 }
 
+/** Syntax the decoration pass must not reach into. */
+const PROTECTED_NODES = new Set(["InlineCode", "HTMLTag", "Comment", "Entity", "URL", "Link"]);
+
+function collectProtectedRanges(view: EditorView): TextMask[] {
+  const ranges: TextMask[] = [];
+  syntaxTree(view.state).iterate({
+    enter(node) {
+      if (PROTECTED_NODES.has(node.name)) {
+        ranges.push({ from: node.from, to: node.to });
+      }
+    },
+  });
+  return ranges;
+}
+
 /** Literal-line map for a whole document, computed once per edit. */
 function literalLinesFor(doc: Text): boolean[] {
   const lines: string[] = [];
   for (const line of doc.iterLines(1, doc.lines + 1)) {
     lines.push(line);
   }
-  return findLiteralLines(lines);
+  return findLiteralLines(lines, { multilineCode: false });
 }
 
 function buildDecorations(view: EditorView, literalLines: boolean[]): DecorationSet {
@@ -91,6 +107,7 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
   const decorations: Range<Decoration>[] = [];
   const doc = view.state.doc;
   const parserRanges = collectParserEmphasis(view);
+  const protectedRanges = collectProtectedRanges(view);
   const cursorHead = view.state.selection.main.head;
 
   const marks = new Map<string, Decoration>();
@@ -119,7 +136,31 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
   for (const lineNumber of visibleLines) {
     if (literalLines[lineNumber - 1]) continue;
     const line = doc.line(lineNumber);
-    const { matches } = scanLine(line.text);
+    // Table rows are rendered by a widget; decorating them would compete with
+    // the cell layout.
+    if (/^\s*\|/.test(line.text)) continue;
+
+    const lineMasks: TextMask[] = [];
+    for (const range of protectedRanges) {
+      if (range.from >= line.to || range.to <= line.from) continue;
+      lineMasks.push({
+        from: Math.max(range.from, line.from) - line.from,
+        to: Math.min(range.to, line.to) - line.from,
+      });
+    }
+    const wikilink = /!?\[\[[^\]\n]+\]\]/g;
+    let link: RegExpExecArray | null;
+    while ((link = wikilink.exec(line.text)) !== null) {
+      lineMasks.push({ from: link.index, to: link.index + link[0].length });
+    }
+    const inlineMath = /(^|[^$])\$([^$\n]+)\$(?!\$)/g;
+    let math: RegExpExecArray | null;
+    while ((math = inlineMath.exec(line.text)) !== null) {
+      const start = math.index + math[1].length;
+      lineMasks.push({ from: start, to: start + math[2].length + 2 });
+    }
+
+    const { matches } = scanLine(line.text, lineMasks);
     if (matches.length === 0) continue;
 
     const cursorOnLine = cursorHead >= line.from && cursorHead <= line.to;

@@ -126,6 +126,20 @@ assert.deepEqual(kinds("*`x` *字。*后"), ["em"]);
 assert.deepEqual(kinds("**甲** *乙。*续"), ["strong", "em"]);
 assert.deepEqual(kinds("**甲** *乙。*续 *丙。*续"), ["strong", "em", "em"]);
 
+// An escaped marker inside the span must not discard the real closer.
+assert.deepEqual(kinds("*中\\*文。*续"), ["em"]);
+assert.deepEqual(kinds("**中\\*文。**后"), ["strong"]);
+
+// Preview can add masks for syntax it does not want to touch.
+assert.deepEqual(
+  scanLine("**甲** *乙。*续", [{ from: 0, to: 5 }]).matches.map((match) => match.kind),
+  ["em"],
+);
+
+// The command treats multi-line code lines as literal; preview does not.
+assert.deepEqual(findLiteralLines(["`a", "b` **字。**后"]), [true, true]);
+assert.deepEqual(findLiteralLines(["`a", "b` **字。**后"], { multilineCode: false }), [false, false]);
+
 const highlightFix = findSourceFixes("前==重要！==后");
 assert.equal(highlightFix[0].replacement, "==重要==！");
 
