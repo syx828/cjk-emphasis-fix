@@ -605,20 +605,70 @@ function stripMathMarkers(line: string): string {
   }
 }
 
-export interface LiteralOptions {
-  /**
-   * Treat lines touched by a multi-line inline code span as literal. The
-   * command needs this; Live Preview handles the same span with masks instead
-   * so the rest of the line can still be decorated.
-   */
-  multilineCode?: boolean;
+/**
+ * Single-`$` inline math spans outside protected syntax.
+ *
+ * The closer search keeps the opener across escaped dollars, skips complete
+ * `$$` runs, and never pairs across a protected range (a `$` inside a URL must
+ * not close a span that starts in prose).
+ */
+export function findInlineMathMasks(
+  text: string,
+  protectedRanges: readonly TextMask[] = [],
+): TextMask[] {
+  const isProtected = (position: number): boolean =>
+    protectedRanges.some((range) => range.from <= position && position < range.to);
+  const isEscaped = (position: number): boolean => {
+    let slashes = 0;
+    let cursor = position - 1;
+    while (cursor >= 0 && text[cursor] === "\\") {
+      slashes++;
+      cursor--;
+    }
+    return slashes % 2 === 1;
+  };
+
+  const masks: TextMask[] = [];
+  let index = 0;
+  while (index < text.length) {
+    if (text[index] !== "$") {
+      index++;
+      continue;
+    }
+    if (isProtected(index)) {
+      index++;
+      continue;
+    }
+    if (text[index + 1] === "$") {
+      index += 2;
+      continue;
+    }
+    if (isEscaped(index)) {
+      index++;
+      continue;
+    }
+    let close = index + 1;
+    let matched = -1;
+    while (close < text.length) {
+      if (text[close] !== "$") {
+        close++;
+        continue;
+      }
+      if (text[close + 1] === "$" || isEscaped(close) || isProtected(close)) {
+        close++;
+        continue;
+      }
+      matched = close;
+      break;
+    }
+    if (matched === -1) break;
+    masks.push({ from: index, to: matched + 1 });
+    index = matched + 1;
+  }
+  return masks;
 }
 
-export function findLiteralLines(
-  lines: readonly string[],
-  options: LiteralOptions = {},
-): boolean[] {
-  const markMultilineCode = options.multilineCode ?? true;
+export function findLiteralLines(lines: readonly string[]): boolean[] {
   const stripped = lines.map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
   const starts = lineStartsFor(stripped);
   const frontmatterEnd = findFrontmatterEnd(lines);
@@ -659,7 +709,6 @@ export function findLiteralLines(
   // Inline code that spans lines makes every line it touches literal. A span
   // on one line is handled by the per-line masks.
   for (const node of parsed.inlineNodes) {
-    if (!markMultilineCode) break;
     const first = lineIndexAt(starts, node.from);
     const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
     if (first === last) continue;
@@ -723,13 +772,11 @@ export function findLiteralLines(
   for (let index = 0; index < literal.length; index++) {
     if (blockLiteral[index]) literal[index] = true;
   }
-  if (markMultilineCode) {
-    for (const node of reparsed.inlineNodes) {
-      const first = lineIndexAt(starts, node.from);
-      const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
-      if (first === last) continue;
-      for (let index = first; index <= last; index++) literal[index] = true;
-    }
+  for (const node of reparsed.inlineNodes) {
+    const first = lineIndexAt(starts, node.from);
+    const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
+    if (first === last) continue;
+    for (let index = first; index <= last; index++) literal[index] = true;
   }
 
   return literal;

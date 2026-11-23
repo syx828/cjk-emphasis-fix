@@ -11,6 +11,7 @@ import { editorLivePreviewField } from "obsidian";
 import { getSettings } from "./settings";
 import {
   findExcessParserRanges,
+  findInlineMathMasks,
   findLiteralLines,
   scanLine,
   EmphasisMatch,
@@ -154,18 +155,14 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
     while ((link = wikilink.exec(line.text)) !== null) {
       lineMasks.push({ from: link.index, to: link.index + link[0].length });
     }
-    for (let index = 0; index < line.text.length; index++) {
-      if (line.text[index] !== "$") continue;
-      if (index > 0 && line.text[index - 1] === "\\") continue;
-      if (line.text[index + 1] === "$") continue;
-      const close = line.text.indexOf("$", index + 1);
-      if (close === -1) break;
-      if (close > 0 && line.text[close - 1] === "\\") {
-        index = close;
-        continue;
-      }
-      lineMasks.push({ from: index, to: close + 1 });
-      index = close;
+    const linkDestination = /\]\(([^)\n]*)\)/g;
+    let destination: RegExpExecArray | null;
+    while ((destination = linkDestination.exec(line.text)) !== null) {
+      const start = destination.index + 2;
+      lineMasks.push({ from: start, to: start + destination[1].length });
+    }
+    for (const mask of findInlineMathMasks(line.text, lineMasks)) {
+      lineMasks.push(mask);
     }
 
     const { matches } = scanLine(line.text, lineMasks);

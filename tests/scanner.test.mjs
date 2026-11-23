@@ -5,6 +5,7 @@ import {
   findDocumentFixes,
   findExcessParserRanges,
   findLiteralLines,
+  findInlineMathMasks,
 } from "./scanner.bundle.mjs";
 
 function kinds(text) {
@@ -146,9 +147,18 @@ assert.deepEqual(
   ["em"],
 );
 
-// The command treats multi-line code lines as literal; preview does not.
+// The command treats multi-line code lines as literal.
 assert.deepEqual(findLiteralLines(["`a", "b` **字。**后"]), [true, true]);
-assert.deepEqual(findLiteralLines(["`a", "b` **字。**后"], { multilineCode: false }), [false, false]);
+
+// Single-`$` math keeps the opener across an escaped dollar, skips `$$` runs,
+// and never pairs across a protected range.
+assert.deepEqual(findInlineMathMasks("$*字。*后\\$x$"), [{ from: 0, to: 10 }]);
+assert.deepEqual(findInlineMathMasks("$$x$$*字。*后$x$"), [{ from: 10, to: 13 }]);
+assert.deepEqual(
+  findInlineMathMasks("[a](x$y) *字。*后$x$", [{ from: 4, to: 9 }]),
+  [{ from: 14, to: 17 }],
+);
+assert.deepEqual(findInlineMathMasks("\\$*字。*后\\$"), []);
 
 const highlightFix = findSourceFixes("前==重要！==后");
 assert.equal(highlightFix[0].replacement, "==重要==！");
