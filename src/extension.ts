@@ -73,7 +73,7 @@ function classesFor(kind: EmphasisMatch["kind"]): string[] {
 }
 
 /** Syntax the decoration pass must not reach into. */
-const PROTECTED_NODES = new Set(["InlineCode", "HTMLTag", "Comment", "Entity", "URL", "Link"]);
+const PROTECTED_NODES = new Set(["InlineCode", "HTMLTag", "Comment", "Entity", "URL"]);
 
 function collectProtectedRanges(view: EditorView): TextMask[] {
   const ranges: TextMask[] = [];
@@ -93,7 +93,7 @@ function literalLinesFor(doc: Text): boolean[] {
   for (const line of doc.iterLines(1, doc.lines + 1)) {
     lines.push(line);
   }
-  return findLiteralLines(lines, { multilineCode: false });
+  return findLiteralLines(lines);
 }
 
 function buildDecorations(view: EditorView, literalLines: boolean[]): DecorationSet {
@@ -137,8 +137,9 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
     if (literalLines[lineNumber - 1]) continue;
     const line = doc.line(lineNumber);
     // Table rows are rendered by a widget; decorating them would compete with
-    // the cell layout.
-    if (/^\s*\|/.test(line.text)) continue;
+    // the cell layout. Require a leading and trailing pipe so ordinary prose
+    // that happens to start with "|" is not skipped.
+    if (/^\s*\|.*\|\s*$/.test(line.text)) continue;
 
     const lineMasks: TextMask[] = [];
     for (const range of protectedRanges) {
@@ -153,11 +154,18 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
     while ((link = wikilink.exec(line.text)) !== null) {
       lineMasks.push({ from: link.index, to: link.index + link[0].length });
     }
-    const inlineMath = /(^|[^$])\$([^$\n]+)\$(?!\$)/g;
-    let math: RegExpExecArray | null;
-    while ((math = inlineMath.exec(line.text)) !== null) {
-      const start = math.index + math[1].length;
-      lineMasks.push({ from: start, to: start + math[2].length + 2 });
+    for (let index = 0; index < line.text.length; index++) {
+      if (line.text[index] !== "$") continue;
+      if (index > 0 && line.text[index - 1] === "\\") continue;
+      if (line.text[index + 1] === "$") continue;
+      const close = line.text.indexOf("$", index + 1);
+      if (close === -1) break;
+      if (close > 0 && line.text[close - 1] === "\\") {
+        index = close;
+        continue;
+      }
+      lineMasks.push({ from: index, to: close + 1 });
+      index = close;
     }
 
     const { matches } = scanLine(line.text, lineMasks);

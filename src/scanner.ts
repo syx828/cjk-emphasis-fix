@@ -247,29 +247,37 @@ function scanWithRegex(
       continue;
     }
     if (isEscaped(text, contentTo)) {
-      // The marker the pattern picked is escaped; keep the opener and look for
-      // the next real closer, as in `*中\*文。*续`.
-      const closerStart = findNextDelimiter(
-        text,
-        pass.marker,
-        pass.delimiterLength,
-        to,
-      );
-      if (closerStart === -1) {
+      // Only a single-marker span recovers: `*中\*文。*续`. Runs such as
+      // `**字\**文**` have different CommonMark semantics, so they keep the
+      // conservative "no match" behaviour.
+      if (pass.delimiterLength !== 1) {
+        expression.lastIndex = from + 1;
+        continue;
+      }
+      // Search the masked text so a delimiter inside inline code or math can
+      // never close the span, and check escaping against the original.
+      const closerStart = findNextDelimiter(scannable, pass.marker, 1, to);
+      if (closerStart === -1 || isEscaped(text, closerStart)) {
+        expression.lastIndex = from + 1;
+        continue;
+      }
+      const extended = { from, to: closerStart + 1 };
+      if (consumed.some((item) => overlaps(item, extended))) {
         expression.lastIndex = from + 1;
         continue;
       }
       const escapedCandidate = isValidCandidate(
         text,
         from,
-        closerStart + pass.delimiterLength,
+        extended.to,
         contentFrom,
         closerStart,
         pass,
       );
       if (escapedCandidate && canOpenEmphasis(text, from, pass.delimiterLength)) {
         matches.push(escapedCandidate);
-        consumed.push({ from, to: closerStart + pass.delimiterLength });
+        consumed.push(extended);
+        expression.lastIndex = extended.to;
       } else {
         expression.lastIndex = from + 1;
       }
@@ -307,7 +315,7 @@ function findNextDelimiter(
     const runStart = index;
     let runEnd = runStart;
     while (runEnd < text.length && text[runEnd] === marker) runEnd++;
-    if (runEnd - runStart === length && !isEscaped(text, runStart)) return runStart;
+    if (runEnd - runStart === length) return runStart;
     index = runEnd;
   }
   return -1;

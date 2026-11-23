@@ -129,6 +129,16 @@ assert.deepEqual(kinds("**甲** *乙。*续 *丙。*续"), ["strong", "em", "em"
 // An escaped marker inside the span must not discard the real closer.
 assert.deepEqual(kinds("*中\\*文。*续"), ["em"]);
 assert.deepEqual(kinds("**中\\*文。**后"), ["strong"]);
+// Recovery never reaches into inline code or across accepted spans.
+assert.deepEqual(kinds("*字\\*`*`"), []);
+const recovered = findSourceFixes("*字\\* **甲。**乙。*后");
+for (let first = 0; first < recovered.length; first++) {
+  for (let second = first + 1; second < recovered.length; second++) {
+    const a = recovered[first];
+    const b = recovered[second];
+    assert.ok(a.to <= b.from || b.to <= a.from, "rewrite edits must not overlap");
+  }
+}
 
 // Preview can add masks for syntax it does not want to touch.
 assert.deepEqual(
