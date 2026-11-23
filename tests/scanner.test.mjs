@@ -31,6 +31,22 @@ assert.deepEqual(kinds("`**文字。**x`"), []);
 assert.deepEqual(kinds("$$**文字。**x$$"), []);
 assert.deepEqual(kinds("`==文字。==x`"), []);
 
+// Emphasis is allowed to contain inline code. The code span must hide its own
+// delimiters, not split the line in half.
+assert.deepEqual(kinds("**加粗含 `code` 的文本。**后续"), ["strong"]);
+assert.deepEqual(kinds("==高亮含 `code` 的文本。==后续"), ["highlight"]);
+assert.deepEqual(kinds("~~删除含 `code` 的文本。~~后续"), ["strike"]);
+
+const inlineCodeLine =
+  "因此，未来不是“编译器消灭 MKL”，而是**“高级抽象（`std::linalg`/张量 DSL）+ 专用调度编译器（处理融合与不规则尺寸）+ 底层专家级微内核（MKL/BLIS/CUTLASS）”**长期共存的格局。 ";
+const inlineCodeMatches = scanLine(inlineCodeLine).matches;
+assert.equal(inlineCodeMatches.length, 1, "emphasis around inline code");
+assert.equal(inlineCodeMatches[0].kind, "strong");
+assert.equal(
+  inlineCodeLine.slice(inlineCodeMatches[0].contentFrom, inlineCodeMatches[0].contentTo),
+  "“高级抽象（`std::linalg`/张量 DSL）+ 专用调度编译器（处理融合与不规则尺寸）+ 底层专家级微内核（MKL/BLIS/CUTLASS）”",
+);
+
 // setext underline must not be read as highlight
 assert.deepEqual(kinds("==="), []);
 assert.deepEqual(kinds("===="), []);

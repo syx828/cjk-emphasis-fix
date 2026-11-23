@@ -145,25 +145,46 @@ function isValidCandidate(
 }
 
 /**
- * Scan one segment for one delimiter type.
+ * Replace every character inside a mask with a placeholder that cannot act as a
+ * delimiter. Indices are preserved, so a match found in the masked text can be
+ * mapped straight back onto the real line.
+ *
+ * Masked spans only need to be hidden from the delimiter pattern: emphasis may
+ * legitimately contain inline code (`**see `npm test` for details。**继续`), and
+ * splitting the line at every mask would lose such a span entirely.
+ */
+function maskDelimiters(text: string, masks: TextMask[]): string {
+  if (masks.length === 0) return text;
+  const characters = text.split("");
+  for (const mask of masks) {
+    const end = Math.min(text.length, mask.to);
+    for (let i = Math.max(0, mask.from); i < end; i++) {
+      characters[i] = "\u0000";
+    }
+  }
+  return characters.join("");
+}
+
+/**
+ * Scan one line for one delimiter type. Delimiters inside masks were replaced
+ * with placeholders beforehand, so they can never open or close a span, while
+ * masked content in the middle of a span is harmless.
  *
  * Lookbehind is avoided on purpose: iOS before 16.4 does not support it, and
  * Obsidian ships on mobile, so the boundary checks are done by index instead.
  */
 function scanWithRegex(
   text: string,
-  start: number,
-  end: number,
+  scannable: string,
   pass: ScanPass,
   consumed: TextMask[],
 ): EmphasisMatch[] {
-  const segment = text.slice(start, end);
   const matches: EmphasisMatch[] = [];
   const expression = pass.expression;
   expression.lastIndex = 0;
   let match: RegExpExecArray | null;
-  while ((match = expression.exec(segment)) !== null) {
-    const from = start + match.index;
+  while ((match = expression.exec(scannable)) !== null) {
+    const from = match.index;
     const to = from + match[0].length;
     const range = { from, to };
     if (consumed.some((item) => overlaps(item, range))) continue;
@@ -186,22 +207,12 @@ function scanWithRegex(
 
 export function scanLine(text: string): { matches: EmphasisMatch[]; masks: TextMask[] } {
   const masks = findMasks(text);
+  const scannable = maskDelimiters(text, masks);
   const consumed: TextMask[] = [];
   const matches: EmphasisMatch[] = [];
-  const segments: TextMask[] = [];
-  let cursor = 0;
-  for (const mask of masks) {
-    if (cursor < mask.from) segments.push({ from: cursor, to: mask.from });
-    cursor = Math.max(cursor, mask.to);
-  }
-  if (cursor < text.length) segments.push({ from: cursor, to: text.length });
 
-  for (const segment of segments) {
-    for (const pass of SCAN_PASSES) {
-      matches.push(
-        ...scanWithRegex(text, segment.from, segment.to, pass, consumed),
-      );
-    }
+  for (const pass of SCAN_PASSES) {
+    matches.push(...scanWithRegex(text, scannable, pass, consumed));
   }
 
   return {
