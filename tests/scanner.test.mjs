@@ -744,4 +744,117 @@ findLiteralLines(
 );
 assert.deepEqual(singleLineCodes, []);
 
+// --- 0.4.9 blockers: cross-line code pending during math masking, one display
+// --- math predicate, wiki-owned backticks, and an indexed barrier lookup. ---
+
+// 1) A code opener that stays open owns the start of the next line. Its closer
+// is found before math is masked, so the code span survives and the math after
+// the closer keeps its stars.
+const pendingCode = ["`", "$`$*字*$"];
+const pendingCodes = [];
+const pendingLiteral = findLiteralLines(
+  pendingCode,
+  { displayBlocks: "standalone", multilineCode: false },
+  pendingCodes,
+);
+assert.deepEqual(pendingLiteral, [false, false]);
+assert.deepEqual(pendingCodes, [{ from: 0, to: 4 }]);
+assert.deepEqual(previewMatches(pendingCode, pendingCodes), []);
+
+const pendingProse = ["`", "$`$*字*$ *文*"];
+const pendingProseCodes = [];
+findLiteralLines(
+  pendingProse,
+  { displayBlocks: "standalone", multilineCode: false },
+  pendingProseCodes,
+);
+assert.deepEqual(pendingProseCodes, [{ from: 0, to: 4 }]);
+assert.deepEqual(previewMatches(pendingProse, pendingProseCodes), [[10, 13]]);
+
+// The reverse ownership (math first, then the real code opener) is unchanged.
+const reverseOwnership = ["$`$`", "*字*`"];
+const reverseCodes = [];
+findLiteralLines(
+  reverseOwnership,
+  { displayBlocks: "standalone", multilineCode: false },
+  reverseCodes,
+);
+assert.deepEqual(reverseCodes, [{ from: 3, to: 9 }]);
+assert.deepEqual(previewMatches(reverseOwnership, reverseCodes), []);
+
+// 2) Standalone display math closes only on a bare `$$` line, using the same
+// predicate in the tracker and in the literal pass. `b$$` is content.
+const displayClose = ["$$", "b$$", "`", "$$", "*字* `x`"];
+const displayCodes = [];
+const displayLiteral = findLiteralLines(
+  displayClose,
+  { displayBlocks: "standalone", multilineCode: false },
+  displayCodes,
+);
+assert.deepEqual(displayLiteral, [true, true, true, true, false]);
+assert.deepEqual(displayCodes, []);
+assert.deepEqual(previewMatches(displayClose, displayCodes), [[12, 15]]);
+assert.deepEqual(scanPreviewLine("*字* `x`").tokens, [{ from: 4, to: 7, kind: "code" }]);
+
+// 3) A backtick inside a wiki alias is link text: no code range, and the prose
+// after the link is decorated. Brackets inside code stay code content.
+const wikiAlias = ["[[a|`]]", "*字* `x`"];
+assert.deepEqual(findWikiBarriers("[[a|`]]"), [{ from: 0, to: 7 }]);
+const wikiAliasCodes = [];
+const wikiAliasLiteral = findLiteralLines(
+  wikiAlias,
+  { displayBlocks: "standalone", multilineCode: false },
+  wikiAliasCodes,
+);
+assert.deepEqual(wikiAliasLiteral, [false, false]);
+assert.deepEqual(wikiAliasCodes, []);
+assert.deepEqual(previewMatches(wikiAlias, wikiAliasCodes), [[8, 11]]);
+
+const wikiCounterexample = ["`[[a]]*字*`"];
+assert.deepEqual(findWikiBarriers(wikiCounterexample[0]), []);
+const wikiCounterCodes = [];
+findLiteralLines(
+  wikiCounterexample,
+  { displayBlocks: "standalone", multilineCode: false },
+  wikiCounterCodes,
+);
+assert.deepEqual(wikiCounterCodes, []);
+assert.deepEqual(previewMatches(wikiCounterexample, wikiCounterCodes), []);
+
+// 4) The barrier index reaches a continuation line of a multi-line link title,
+// so its `$` cannot pair with a dollar after the title and swallow the opener.
+const urlDollarExact = ["[]($)`$", "*字*`"];
+const urlDollarExactCodes = [];
+findLiteralLines(
+  urlDollarExact,
+  { displayBlocks: "standalone", multilineCode: false },
+  urlDollarExactCodes,
+);
+assert.deepEqual(urlDollarExactCodes, [{ from: 5, to: 12 }]);
+
+const multilineTitle = ['[x](u "t', ' $x") `$', "*字*`"];
+const multilineTitleCodes = [];
+const multilineTitleLiteral = findLiteralLines(
+  multilineTitle,
+  { displayBlocks: "standalone", multilineCode: false },
+  multilineTitleCodes,
+);
+assert.deepEqual(multilineTitleLiteral, [false, false, false]);
+assert.deepEqual(multilineTitleCodes, [{ from: 15, to: 22 }]);
+assert.deepEqual(previewMatches(multilineTitle, multilineTitleCodes), []);
+
+// Many single-line barriers keep their own line only; counts, not times.
+const barrierHeavy = [];
+for (let index = 0; index < 2000; index++) barrierHeavy.push("[x](u)");
+barrierHeavy.push("`", "*字*", "`");
+const barrierHeavyCodes = [];
+const barrierHeavyLiteral = findLiteralLines(
+  barrierHeavy,
+  { displayBlocks: "standalone", multilineCode: false },
+  barrierHeavyCodes,
+);
+assert.deepEqual(barrierHeavyCodes, [{ from: 14000, to: 14007 }]);
+assert.equal(barrierHeavyLiteral.length, 2003);
+assert.ok(barrierHeavyLiteral.every((value) => value === false));
+
 console.log("scanner tests: ok");
