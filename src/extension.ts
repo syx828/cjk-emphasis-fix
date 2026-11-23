@@ -174,29 +174,22 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
     // owns those characters. Drop such tokens, then decide the candidate:
     // inside a surviving token → code content; spanning two or more tokens →
     // an invented link; otherwise it is a link that may contain one token.
-    const validTokens = initial.tokens.filter(
-      (token) =>
-        !wikiCandidates.some(
-          (candidate) =>
-            token.from < candidate.to &&
-            candidate.from < token.to &&
-            !(candidate.from <= token.from && token.to <= candidate.to),
-        ),
-    );
     const lineBarriers = [
       ...filteredBase,
       ...wikiCandidates.filter((candidate) => {
-        const overlapping = validTokens.filter(
-          (token) => token.from < candidate.to && candidate.from < token.to,
-        );
-        if (
-          overlapping.some(
-            (token) => token.from <= candidate.from && candidate.to <= token.to,
-          )
-        ) {
-          return false;
-        }
-        return overlapping.length < 2;
+        const relevant = initial.tokens.filter((token) => {
+          if (token.from >= candidate.to || candidate.from >= token.to) {
+            return false;
+          }
+          // A token that opens inside the link and runs past its closer is a
+          // bogus pairing created by the link's own delimiters.
+          return !(candidate.from < token.from && token.to > candidate.to);
+        });
+        const bracketInsideToken = (index: number): boolean =>
+          relevant.some((token) => token.from <= index && index < token.to);
+        // Classify by where the brackets fall: a bracket inside code/math means
+        // the "link" is content. Interior tokens are allowed (link with code).
+        return !bracketInsideToken(candidate.from) && !bracketInsideToken(candidate.to - 1);
       }),
     ];
     const { tokens, matches } = scanPreviewLine(line.text, lineBarriers);

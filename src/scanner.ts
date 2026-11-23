@@ -825,42 +825,18 @@ function stripMathMarkers(line: string): string {
   }
 }
 
-function mathOpenBefore(
-  lines: readonly string[],
-  standalone: boolean,
-  skip: readonly boolean[] = [],
-): boolean[] {
-  const open = new Array<boolean>(lines.length + 1).fill(false);
-  let inMath = false;
-  for (let index = 0; index < lines.length; index++) {
-    open[index] = inMath;
-    if (skip[index]) continue;
-    const candidate = stripMathMarkers(lines[index].replace(/\r$/, ""));
-    if (inMath) {
-      const closes = standalone
-        ? candidate === "$$"
-        : candidate.trimEnd().endsWith("$$");
-      if (closes) inMath = false;
-      continue;
-    }
-    const opens = standalone
-      ? candidate === "$$"
-      : candidate.startsWith("$$") && candidate.indexOf("$$", 2) === -1;
-    if (opens) inMath = true;
-  }
-  open[lines.length] = inMath;
-  return open;
-}
-
-/** End offset of the display-math block enclosing each line, or -1. */
-function mathBlockEnds(
+function mathRegions(
   lines: readonly string[],
   starts: readonly number[],
   standalone: boolean,
-): number[] {
+  skip: readonly boolean[] = [],
+): { open: boolean[]; ends: number[] } {
+  const open = new Array<boolean>(lines.length + 1).fill(false);
   const ends = new Array<number>(lines.length).fill(-1);
   let start = -1;
   for (let index = 0; index < lines.length; index++) {
+    open[index] = start !== -1;
+    if (skip[index]) continue;
     const candidate = stripMathMarkers(lines[index].replace(/\r$/, ""));
     const closes = standalone
       ? candidate === "$$"
@@ -878,11 +854,12 @@ function mathBlockEnds(
       start = -1;
     }
   }
+  open[lines.length] = start !== -1;
   if (start !== -1) {
     const end = starts[lines.length - 1] + lines[lines.length - 1].length;
     for (let line = start; line < lines.length; line++) ends[line] = end;
   }
-  return ends;
+  return { open, ends };
 }
 
 function startsInsideDisplayMath(
@@ -958,8 +935,12 @@ export function findLiteralLines(
   const mathSkip = parserLiteral.map(
     (value, index) => value || index <= frontmatterEnd,
   );
-  const mathOpen = mathOpenBefore(stripped, standaloneDisplay, mathSkip);
-  const blockEnds = mathBlockEnds(stripped, starts, standaloneDisplay);
+  const { open: mathOpen, ends: blockEnds } = mathRegions(
+    stripped,
+    starts,
+    standaloneDisplay,
+    mathSkip,
+  );
   for (const node of parsed.inlineNodes) {
     const first = lineIndexAt(starts, node.from);
     const column = node.from - starts[first];
@@ -1164,8 +1145,12 @@ export function findDocumentFixes(text: string): SourceFix[] {
   const mathSkip = blockLiteral.map(
     (value, index) => value || index <= frontmatterEnd,
   );
-  const mathOpen = mathOpenBefore(lines, false, mathSkip);
-  const blockEnds = mathBlockEnds(lines, starts, false);
+  const { open: mathOpen, ends: blockEnds } = mathRegions(
+    lines,
+    starts,
+    false,
+    mathSkip,
+  );
   const usableInline: TextMask[] = [];
   const characters = text.split("");
   const blankRange = (from: number, to: number): void => {
@@ -1241,7 +1226,15 @@ export function findDocumentFixes(text: string): SourceFix[] {
   for (const barrier of documentBarriers) {
     blankComment(barrier.from, barrier.to);
   }
-  const commentView = commentChars.join("");
+  // Wiki-link syntax is opaque during comment detection: `%%` inside a link
+  // target belongs to the link, not to a comment.
+  let commentView = commentChars.join("");
+  const wikiPattern = /!?\[\[[^\]\n]*\]\]/g;
+  let wikiMatch: RegExpExecArray | null;
+  while ((wikiMatch = wikiPattern.exec(commentView)) !== null) {
+    blankComment(wikiMatch.index, wikiMatch.index + wikiMatch[0].length);
+  }
+  commentView = commentChars.join("");
   const barriers = [...documentBarriers, ...findCommentRanges(commentView)];
   let lineFrom = 0;
 
