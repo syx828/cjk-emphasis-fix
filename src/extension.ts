@@ -172,6 +172,14 @@ function buildDecorations(
         to: Math.min(range.to, line.to) - line.from,
       });
     }
+    const lineCode: TextMask[] = [];
+    for (const range of analysis.codeRanges) {
+      if (range.to <= line.from || range.from >= line.to) continue;
+      lineCode.push({
+        from: Math.max(range.from, line.from) - line.from,
+        to: Math.min(range.to, line.to) - line.from,
+      });
+    }
     // Wiki links are recognised by a regex, not a parser. A match that falls
     // inside a code or math token is that token's content, and one that spans
     // two tokens is not a wiki link at all, so filter before tokenizing again.
@@ -181,7 +189,7 @@ function buildDecorations(
     while ((link = wikilink.exec(line.text)) !== null) {
       wikiCandidates.push({ from: link.index, to: link.index + link[0].length });
     }
-    const rawTokens = scanPreviewLine(line.text, []).tokens;
+    const rawTokens = scanPreviewLine(line.text, [], lineCode).tokens;
     const filteredBase = baseBarriers.filter(
       (barrier) =>
         !rawTokens.some(
@@ -191,7 +199,7 @@ function buildDecorations(
             barrier.to <= token.to,
         ),
     );
-    const initial = scanPreviewLine(line.text, filteredBase);
+    const initial = scanPreviewLine(line.text, filteredBase, lineCode);
     // A token that straddles a wiki candidate is not real code/math: the link
     // owns those characters. Drop such tokens, then decide the candidate:
     // inside a surviving token → code content; spanning two or more tokens →
@@ -214,14 +222,6 @@ function buildDecorations(
         return !bracketInsideToken(candidate.from) && !bracketInsideToken(candidate.to - 1);
       }),
     ];
-    const lineCode: TextMask[] = [];
-    for (const range of analysis.codeRanges) {
-      if (range.to <= line.from || range.from >= line.to) continue;
-      lineCode.push({
-        from: Math.max(range.from, line.from) - line.from,
-        to: Math.min(range.to, line.to) - line.from,
-      });
-    }
     const { tokens, matches } = scanPreviewLine(line.text, lineBarriers, lineCode);
     if (matches.length === 0) continue;
 

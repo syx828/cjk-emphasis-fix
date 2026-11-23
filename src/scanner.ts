@@ -929,6 +929,7 @@ export function findLiteralLines(
     bomOffset = 1;
   }
   const starts = lineStartsFor(stripped);
+  const originalStarts = lineStartsFor(lines);
   const frontmatterEnd = findFrontmatterEnd(lines);
 
   const parse = (text: string): { blockNodes: TextMask[]; inlineNodes: TextMask[] } => {
@@ -980,6 +981,15 @@ export function findLiteralLines(
       const first = lineIndexAt(starts, node.from);
       const column = node.from - starts[first];
       if (startsInsideDisplayMath(stripped, open, first, column, standaloneDisplay)) continue;
+      // A backtick inside inline math is math content, not a code opener.
+      const startTokens = tokenizePreviewLine(stripped[first], []);
+      if (
+        startTokens.some(
+          (token) => token.kind !== "code" && token.from <= column && column < token.to,
+        )
+      ) {
+        continue;
+      }
       const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
       if (first === last) continue;
       collected.push({ from: node.from, to: node.to });
@@ -1087,6 +1097,7 @@ export function findLiteralLines(
       const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
       if (first === last) continue;
       collected.push({ from: node.from, to: node.to });
+      for (let index = first; index <= last; index++) multilineLines[index] = true;
       if (markMultiline) {
         for (let index = first; index <= last; index++) literal[index] = true;
       }
@@ -1096,11 +1107,13 @@ export function findLiteralLines(
   }
 
   if (codeRanges) {
+    const toOriginal = (offset: number): number => {
+      const index = lineIndexAt(starts, offset);
+      const delta = originalStarts[index] - starts[index];
+      return offset + delta + (index === 0 ? bomOffset : 0);
+    };
     for (const range of collected) {
-      codeRanges.push({
-        from: range.from + bomOffset,
-        to: range.to + bomOffset,
-      });
+      codeRanges.push({ from: toOriginal(range.from), to: toOriginal(range.to) });
     }
   }
   return literal;

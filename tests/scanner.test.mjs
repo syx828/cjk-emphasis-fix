@@ -178,6 +178,30 @@ const lateLiteral = findLiteralLines(
 );
 assert.deepEqual(lateLiteral, [true, true, true, false, false, false]);
 assert.ok(lateCodes.length > 0);
+// Reparsed code must also update the math skip: its `$$` cannot open math.
+const codeDollar = ["$$", "~~~", "$$", "`", "$$", "`", "*字*"];
+const codeDollarCodes = [];
+const codeDollarLiteral = findLiteralLines(
+  codeDollar,
+  { displayBlocks: "standalone", multilineCode: false },
+  codeDollarCodes,
+);
+assert.deepEqual(codeDollarLiteral, [true, true, true, false, false, false, false]);
+assert.ok(codeDollarCodes.some((range) => range.from === 10 && range.to === 16));
+// A backtick inside inline math is not a code opener.
+const mathBacktick = ["$`$", "*字*`"];
+const mathBacktickCodes = [];
+findLiteralLines(
+  mathBacktick,
+  { displayBlocks: "standalone", multilineCode: false },
+  mathBacktickCodes,
+);
+assert.deepEqual(mathBacktickCodes, []);
+// Recovered ranges use original-document offsets with CRLF.
+const crlfLines = ["x\r", "😀`a\r", "b` *字*"];
+const crlfCodes = [];
+findLiteralLines(crlfLines, { displayBlocks: "standalone", multilineCode: false }, crlfCodes);
+assert.ok(crlfCodes.some((range) => range.from === 5 && range.to === 11));
 
 // Tokenizer: code and math ownership in source order.
 const tokenRanges = (text, barriers = []) =>
