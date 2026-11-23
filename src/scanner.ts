@@ -1,3 +1,4 @@
+import { parser as markdownParser } from "@lezer/markdown";
 import {
   hasCJKRelatedContent,
   isPunctuation,
@@ -426,77 +427,41 @@ export function findExcessParserRanges(
   return excess;
 }
 
-interface Fence {
-  character: string;
-  length: number;
-  quoteDepth: number;
-  containerIndent: number;
-}
-
-interface MathBlock {
-  quoteDepth: number;
-  containerIndent: number;
-}
-
-const LIST_ITEM = /^( {0,3})([-+*]|\d{1,9}[.)])( +)/;
-const OPENING_FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-const CLOSING_FENCE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
-
-function parseQuoteMarkers(line: string): { depth: number; rest: string } {
-  let rest = line;
-  let depth = 0;
-  for (;;) {
-    const match = rest.match(/^ {0,3}> ?/);
-    if (!match) break;
-    depth++;
-    rest = rest.slice(match[0].length);
+/** Offsets of each line start, plus one past the end of the document. */
+function lineStartsFor(lines: readonly string[]): number[] {
+  const starts: number[] = [];
+  let offset = 0;
+  for (const line of lines) {
+    starts.push(offset);
+    offset += line.length + 1;
   }
-  return { depth, rest };
+  starts.push(offset);
+  return starts;
 }
 
-/** Strip exactly `depth` blockquote markers; null when the line is shallower. */
-function stripQuoteDepth(line: string, depth: number): string | null {
-  let rest = line;
-  for (let level = 0; level < depth; level++) {
-    const match = rest.match(/^ {0,3}> ?/);
-    if (!match) return null;
-    rest = rest.slice(match[0].length);
+function lineIndexAt(starts: readonly number[], offset: number): number {
+  let low = 0;
+  let high = Math.max(0, starts.length - 2);
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (starts[middle + 1] <= offset) low = middle + 1;
+    else high = middle;
   }
-  return rest;
+  return low;
 }
 
-/** Indentation width, counting a tab as advancing to the next multiple of 4. */
-function indentationColumns(line: string): number {
-  let column = 0;
-  for (const character of line) {
-    if (character === " ") column++;
-    else if (character === "\t") column += 4 - (column % 4);
-    else break;
+/** Mark every line touched by the half-open range [from, to). */
+function markLines(
+  literal: boolean[],
+  starts: readonly number[],
+  from: number,
+  to: number,
+): void {
+  if (to <= from) return;
+  const first = lineIndexAt(starts, from);
+  for (let index = first; index < literal.length && starts[index] < to; index++) {
+    literal[index] = true;
   }
-  return column;
-}
-
-/** Remove `columns` of leading whitespace; null when the line is shallower. */
-function stripIndent(line: string, columns: number): string | null {
-  let column = 0;
-  let index = 0;
-  while (index < line.length && column < columns) {
-    const character = line[index];
-    if (character === " ") column++;
-    else if (character === "\t") column += 4 - (column % 4);
-    else return null;
-    index++;
-  }
-  return column >= columns ? line.slice(index) : null;
-}
-
-function isClosingFence(line: string, fence: Fence): boolean {
-  const match = line.match(CLOSING_FENCE);
-  return (
-    match !== null &&
-    match[1][0] === fence.character &&
-    match[1].length >= fence.length
-  );
 }
 
 /** YAML frontmatter: `---` on line one, a closing delimiter, no blank line. */
@@ -511,177 +476,88 @@ function findFrontmatterEnd(lines: readonly string[]): number {
   return -1;
 }
 
-type HtmlBlock =
-  | { kind: "until-pattern"; pattern: RegExp }
-  | { kind: "until-blank" }
-  | { kind: "single" };
-
-/** Block-level tags: their content is raw HTML up to the next blank line. */
-const BLOCK_TAGS = new Set([
-  "address", "article", "aside", "base", "basefont", "blockquote", "body",
-  "caption", "center", "col", "colgroup", "dd", "details", "dialog", "dir",
-  "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form",
-  "frame", "frameset", "h1", "h2", "h3", "h4", "h5", "h6", "head", "header",
-  "hr", "html", "iframe", "legend", "li", "link", "main", "menu", "menuitem",
-  "nav", "noframes", "ol", "optgroup", "option", "p", "param", "search",
-  "section", "summary", "table", "tbody", "td", "tfoot", "th", "thead",
-  "title", "tr", "track", "ul",
-]);
-
-/** Open an HTML block whose body must not be rewritten. */
-function openHtmlBlock(line: string): HtmlBlock | null {
-  const tag = line.match(/^ {0,3}<(pre|code|script|style)(?=[\s>]|$)/i);
-  if (tag) {
-    const closer = new RegExp(`</${tag[1].toLowerCase()}\\s*>`, "i");
-    return closer.test(line) ? { kind: "single" } : { kind: "until-pattern", pattern: closer };
-  }
-  if (/^ {0,3}<!--/.test(line)) {
-    return line.includes("-->") ? { kind: "single" } : { kind: "until-pattern", pattern: /-->/ };
-  }
-  const block = line.match(/^ {0,3}<\/?([a-z][a-z0-9-]*)(?=[\s>]|$)/i);
-  if (block && BLOCK_TAGS.has(block[1].toLowerCase())) {
-    return { kind: "until-blank" };
-  }
-  return null;
-}
-
 /**
- * Mark the lines whose content is literal text: fenced code, `$$` math blocks
- * and indented code. Emphasis markers on those lines are content, so neither
- * the rewrite command nor the Live Preview decorations may touch them.
+ * Mark the lines whose content is literal text: fenced code, indented code,
+ * HTML blocks and multi-line inline code. Emphasis markers on those lines are
+ * content, so neither the rewrite command nor the Live Preview decorations may
+ * touch them.
  *
- * Both call sites share this classifier so a line can never be treated as
- * prose for rendering but as code for rewriting, or the other way round.
+ * Block structure comes from `@lezer/markdown`, the parser behind CodeMirror's
+ * Markdown mode, so a fence inside a list item or blockquote follows the same
+ * container rules as the editor instead of a hand-written approximation.
+ * Frontmatter and `$$` math are Obsidian constructs the parser does not know,
+ * so they are layered on top.
  */
 export function findLiteralLines(lines: readonly string[]): boolean[] {
-  const literal: boolean[] = [];
+  const stripped = lines.map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
+  const starts = lineStartsFor(stripped);
   const frontmatterEnd = findFrontmatterEnd(lines);
-  let fence: Fence | null = null;
-  let math: MathBlock | null = null;
-  let htmlBlock: HtmlBlock | null = null;
-  let inIndentedCode = false;
-  let listIndent = 0;
-  // An indented code block cannot interrupt a paragraph: it needs a blank line
-  // (or the start of the document) before it.
-  let afterBlankLine = true;
+  const tree = markdownParser.parse(stripped.join("\n"));
 
-  for (let index = 0; index < lines.length; index++) {
-    const line = lines[index].replace(/\r$/, "");
-    const { depth, rest } = parseQuoteMarkers(line);
-    const trimmed = rest.trim();
-    const blank = trimmed.length === 0;
-
-    if (index <= frontmatterEnd) {
-      literal.push(true);
-      afterBlankLine = blank;
-      continue;
-    }
-
-    if (htmlBlock) {
-      literal.push(true);
-      if (htmlBlock.kind === "until-blank") {
-        if (blank) htmlBlock = null;
-      } else if (htmlBlock.kind === "until-pattern" && htmlBlock.pattern.test(rest)) {
-        htmlBlock = null;
+  const blockNodes: TextMask[] = [];
+  const inlineNodes: TextMask[] = [];
+  tree.iterate({
+    enter(node) {
+      if (node.name === "FencedCode" || node.name === "CodeBlock" || node.name === "HTMLBlock") {
+        blockNodes.push({ from: node.from, to: node.to });
+        return;
       }
-      afterBlankLine = blank;
-      continue;
-    }
-
-    // A fence belongs to the container it opened in: a line from a shallower
-    // blockquote, or one indented less than the list item, ends it. Quote
-    // markers beyond the fence's own depth are content, not nesting.
-    if (fence) {
-      const quoted = stripQuoteDepth(line, fence.quoteDepth);
-      const inner = quoted === null ? null : stripIndent(quoted, fence.containerIndent);
-      if (inner !== null) {
-        if (isClosingFence(inner, fence)) fence = null;
-        literal.push(true);
-        afterBlankLine = blank;
-        continue;
+      if (node.name === "InlineCode") {
+        inlineNodes.push({ from: node.from, to: node.to });
       }
-      fence = null;
-    }
+    },
+  });
 
-    if (math) {
-      const quoted = stripQuoteDepth(line, math.quoteDepth);
-      const inner = quoted === null ? null : stripIndent(quoted, math.containerIndent);
-      if (inner !== null) {
-        if (inner.trimEnd().endsWith("$$")) math = null;
-        literal.push(true);
-        afterBlankLine = blank;
-        continue;
-      }
-      math = null;
-    }
+  const parserLiteral = new Array<boolean>(lines.length).fill(false);
+  for (const node of blockNodes) {
+    markLines(parserLiteral, starts, node.from, node.to);
+  }
 
-    const html = openHtmlBlock(rest);
-    if (html) {
-      if (html.kind !== "single") htmlBlock = html;
-      literal.push(true);
-      afterBlankLine = blank;
+  // `$$` blocks are Obsidian syntax the parser does not know, so they are
+  // located line by line. Lines inside parser blocks are code, not math.
+  const mathLines = new Array<boolean>(lines.length).fill(false);
+  let inMathBlock = false;
+  for (let index = 0; index < stripped.length; index++) {
+    if (inMathBlock) {
+      mathLines[index] = true;
+      if (stripped[index].trimEnd().endsWith("$$")) inMathBlock = false;
       continue;
     }
-
-    // Track the innermost list item so its indented content is prose, not code.
-    let contentColumn = 0;
-    let body = rest;
-    const marker = rest.match(LIST_ITEM);
-    if (marker) {
-      const spaces = Math.min(marker[3].length, 4);
-      contentColumn = marker[1].length + marker[2].length + spaces;
-      listIndent = contentColumn;
-      body = rest.slice(marker[0].length);
-    } else if (!blank && listIndent > 0 && indentationColumns(rest) < listIndent) {
-      listIndent = 0;
-    }
-
-    const bodyIndent = indentationColumns(body);
-    const opening = bodyIndent < 4 ? body.match(OPENING_FENCE) : null;
-    // A backtick fence may not carry a backtick in its info string; such a
-    // line is a paragraph, not a code block.
-    if (opening && !(opening[1][0] === "`" && opening[2].includes("`"))) {
-      fence = {
-        character: opening[1][0],
-        length: opening[1].length,
-        quoteDepth: depth,
-        containerIndent: contentColumn,
-      };
-      literal.push(true);
-      afterBlankLine = blank;
-      continue;
-    }
-
+    if (parserLiteral[index] || index <= frontmatterEnd) continue;
+    const trimmed = stripped[index].trim();
     // A line that opens and closes `$$` on its own is a mask for the line
     // scanner, not a block; only an unclosed opener starts block state.
-    const bodyTrimmed = body.trim();
-    if (
-      bodyIndent < 4 &&
-      bodyTrimmed.startsWith("$$") &&
-      bodyTrimmed.indexOf("$$", 2) === -1
-    ) {
-      math = { quoteDepth: depth, containerIndent: contentColumn };
-      literal.push(true);
-      afterBlankLine = blank;
-      continue;
+    if (trimmed.startsWith("$$") && trimmed.indexOf("$$", 2) === -1) {
+      mathLines[index] = true;
+      inMathBlock = true;
     }
+  }
 
-    const codeIndent = listIndent > 0 ? listIndent + 4 : 4;
-    if (bodyIndent >= codeIndent && (inIndentedCode || afterBlankLine)) {
-      inIndentedCode = true;
-      literal.push(true);
-      afterBlankLine = blank;
-      continue;
-    }
+  // The parser reads whatever follows a `$$` opener as Markdown, so a fence it
+  // reports inside a math block is a false positive; drop those nodes.
+  const literal = new Array<boolean>(lines.length).fill(false);
+  for (const node of blockNodes) {
+    if (mathLines[lineIndexAt(starts, node.from)]) continue;
+    markLines(literal, starts, node.from, node.to);
+  }
+  for (let index = 0; index <= frontmatterEnd && index < literal.length; index++) {
+    literal[index] = true;
+  }
+  for (let index = 0; index < literal.length; index++) {
+    if (mathLines[index]) literal[index] = true;
+  }
 
-    inIndentedCode = false;
-    literal.push(false);
-    afterBlankLine = blank;
+  for (const node of inlineNodes) {
+    const first = lineIndexAt(starts, node.from);
+    const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
+    // A span on one line is handled by the per-line masks; a span across lines
+    // makes every line it touches literal.
+    if (first === last || mathLines[first]) continue;
+    for (let index = first; index <= last; index++) literal[index] = true;
   }
 
   return literal;
 }
-
 /**
  * Scan an entire document for CJK emphasis fixes.
  *
