@@ -164,6 +164,13 @@ assert.deepEqual(findInlineMathMasks("$x$", [{ from: 1, to: 2 }]), []);
 // The second dollar of a `$$` run is never a single-dollar closer or opener.
 assert.deepEqual(findInlineMathMasks("$a$$"), []);
 assert.deepEqual(findInlineMathMasks("$$$a$"), []);
+// An escaped dollar is literal and must not disqualify an adjacent delimiter.
+assert.deepEqual(findInlineMathMasks("$x\\$$"), [{ from: 0, to: 5 }]);
+assert.deepEqual(findInlineMathMasks("\\$$x$"), [{ from: 2, to: 5 }]);
+// Display math is a barrier for single-dollar pairing.
+assert.deepEqual(findInlineMathMasks("$$a$b$$*字。*后$x$", [{ from: 0, to: 7 }]), [
+  { from: 12, to: 15 },
+]);
 
 const highlightFix = findSourceFixes("前==重要！==后");
 assert.equal(highlightFix[0].replacement, "==重要==！");

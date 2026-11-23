@@ -629,10 +629,17 @@ export function findInlineMathMasks(
     }
     return slashes % 2 === 1;
   };
-  // A dollar that touches another dollar belongs to a `$$` run and can never
-  // delimit single-dollar math.
-  const isSingleDollar = (position: number): boolean =>
-    text[position] === "$" && text[position - 1] !== "$" && text[position + 1] !== "$";
+  // A dollar that touches another unescaped dollar belongs to a `$$` run.
+  // Escaped dollars are literal and break the run.
+  const isSingleDollar = (position: number): boolean => {
+    if (text[position] !== "$" || isEscaped(position)) return false;
+    const previous = position - 1;
+    const following = position + 1;
+    const touchesRun =
+      (previous >= 0 && text[previous] === "$" && !isEscaped(previous)) ||
+      (following < text.length && text[following] === "$" && !isEscaped(following));
+    return !touchesRun;
+  };
 
   const masks: TextMask[] = [];
   let index = 0;
@@ -642,10 +649,10 @@ export function findInlineMathMasks(
       continue;
     }
     if (!isSingleDollar(index)) {
-      while (index < text.length && text[index] === "$") index++;
+      index++;
       continue;
     }
-    if (isProtected(index) || isEscaped(index)) {
+    if (isProtected(index)) {
       index++;
       continue;
     }
@@ -657,10 +664,6 @@ export function findInlineMathMasks(
         continue;
       }
       if (!isSingleDollar(close)) {
-        while (close < text.length && text[close] === "$") close++;
-        continue;
-      }
-      if (isEscaped(close)) {
         close++;
         continue;
       }
