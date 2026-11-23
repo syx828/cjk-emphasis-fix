@@ -932,9 +932,14 @@ export function findLiteralLines(
   const originalStarts = lineStartsFor(lines);
   const frontmatterEnd = findFrontmatterEnd(lines);
 
-  const parse = (text: string): { blockNodes: TextMask[]; inlineNodes: TextMask[] } => {
+  const parse = (text: string): {
+    blockNodes: TextMask[];
+    inlineNodes: TextMask[];
+    barrierNodes: TextMask[];
+  } => {
     const blockNodes: TextMask[] = [];
     const inlineNodes: TextMask[] = [];
+    const barrierNodes: TextMask[] = [];
     markdownParser.parse(text).iterate({
       enter(node) {
         if (
@@ -948,10 +953,20 @@ export function findLiteralLines(
         }
         if (node.name === "InlineCode") {
           inlineNodes.push({ from: node.from, to: node.to });
+          return;
+        }
+        if (
+          node.name === "URL" ||
+          node.name === "LinkTitle" ||
+          node.name === "HTMLTag" ||
+          node.name === "Comment" ||
+          node.name === "Entity"
+        ) {
+          barrierNodes.push({ from: node.from, to: node.to });
         }
       },
     });
-    return { blockNodes, inlineNodes };
+    return { blockNodes, inlineNodes, barrierNodes };
   };
 
   const parsed = parse(stripped.join("\n"));
@@ -974,35 +989,59 @@ export function findLiteralLines(
   const baseSkip = parserLiteral.map(
     (value, index) => value || index <= frontmatterEnd,
   );
-  const collectInline = (nodes: readonly TextMask[], open: readonly boolean[]): void => {
-    multilineLines.fill(false);
-    collected.length = 0;
+  const collectInline = (
+    nodes: readonly TextMask[],
+    open: readonly boolean[],
+    textLines: readonly string[],
+    barrierNodes: readonly TextMask[],
+    append = false,
+  ): void => {
+    if (!append) {
+      multilineLines.fill(false);
+      collected.length = 0;
+    }
+    const tokenCache = new Map<number, InlineToken[]>();
+    const tokensForLine = (lineIndex: number): InlineToken[] => {
+      const cached = tokenCache.get(lineIndex);
+      if (cached) return cached;
+      const lineFrom = starts[lineIndex];
+      const lineText = textLines[lineIndex] ?? "";
+      const lineBarriers: TextMask[] = [];
+      for (const barrier of barrierNodes) {
+        if (barrier.to <= lineFrom || barrier.from >= lineFrom + lineText.length) continue;
+        lineBarriers.push({
+          from: Math.max(barrier.from, lineFrom) - lineFrom,
+          to: Math.min(barrier.to, lineFrom + lineText.length) - lineFrom,
+        });
+      }
+      const tokens = tokenizePreviewLine(lineText, lineBarriers);
+      tokenCache.set(lineIndex, tokens);
+      return tokens;
+    };
     for (const node of nodes) {
       const first = lineIndexAt(starts, node.from);
+      const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
+      // Single-line spans are the line tokenizer's business; check this before
+      // tokenizing so a line with many spans is not retokenized per span.
+      if (first === last) continue;
       const column = node.from - starts[first];
       if (startsInsideDisplayMath(stripped, open, first, column, standaloneDisplay)) continue;
-      // A backtick inside inline math is math content, not a code opener.
-      const startTokens = tokenizePreviewLine(stripped[first], []);
-      if (
-        startTokens.some(
-          (token) => token.kind !== "code" && token.from <= column && column < token.to,
-        )
-      ) {
-        continue;
-      }
-      const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
-      if (first === last) continue;
+      const insideMath = tokensForLine(first).some(
+        (token) => token.kind !== "code" && token.from <= column && column < token.to,
+      );
+      if (insideMath) continue;
       collected.push({ from: node.from, to: node.to });
       for (let index = first; index <= last; index++) multilineLines[index] = true;
     }
   };
   let regions = mathRegions(stripped, starts, standaloneDisplay, baseSkip);
-  collectInline(parsed.inlineNodes, regions.open);
-  const skipWithCode = baseSkip.map(
-    (value, index) => value || multilineLines[index],
-  );
-  regions = mathRegions(stripped, starts, standaloneDisplay, skipWithCode);
-  collectInline(parsed.inlineNodes, regions.open);
+  for (let pass = 0; pass < 5; pass++) {
+    collectInline(parsed.inlineNodes, regions.open, stripped, parsed.barrierNodes);
+    const skip = baseSkip.map((value, index) => value || multilineLines[index]);
+    const next = mathRegions(stripped, starts, standaloneDisplay, skip);
+    if (next.open.every((value, index) => value === regions.open[index])) break;
+    regions = next;
+  }
   if (markMultiline) {
     for (let index = 0; index < literal.length; index++) {
       if (multilineLines[index]) literal[index] = true;
@@ -1025,17 +1064,18 @@ export function findLiteralLines(
   }
   for (const node of parsed.inlineNodes) {
     const first = lineIndexAt(starts, node.from);
-    const column = node.from - starts[first];
-    if (startsInsideDisplayMath(stripped, mathOpen, first, column, standaloneDisplay)) {
-      // This "code span" starts inside math, so only the part up to the end of
-      // that math block belongs to math. The closing backtick may be a real
-      // opener in the prose that follows.
-      const blockEnd = blockEnds[first] >= 0 ? blockEnds[first] : node.to;
-      blankRange(node.from, Math.min(node.to, blockEnd));
+    const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
+    if (first === last) continue;
+    const key = `${node.from}:${node.to}`;
+    if (collected.some((range) => `${range.from}:${range.to}` === key)) {
+      const end =
+        blockEnds[first] >= 0 ? Math.min(node.to, blockEnds[first]) : node.to;
+      blankRange(node.from, end);
       continue;
     }
-    const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
-    if (first !== last) blankRange(node.from, node.to);
+    // Rejected (math-owned): blank only its opening line, so a real code
+    // opener on a later line is not erased with the apparent closer.
+    blankRange(node.from, starts[first] + stripped[first].length);
   }
 
   const scanMath = (blockLiteral: readonly boolean[]): boolean[] => {
@@ -1079,11 +1119,22 @@ export function findLiteralLines(
       }
     }
 
-    const reparsed = parse(characters.join(""));
+    const reparsedText = characters.join("");
+    const reparsed = parse(reparsedText);
+    const reparsedLines = reparsedText.split("\n");
     const nextBlock = new Array<boolean>(lines.length).fill(false);
     for (const node of reparsed.blockNodes) {
       markLines(nextBlock, starts, node.from, node.to);
     }
+    const reparseSkip = nextBlock.map(
+      (value, index) => value || index <= frontmatterEnd,
+    );
+    const reparseRegions = mathRegions(
+      reparsedLines,
+      starts,
+      standaloneDisplay,
+      reparseSkip,
+    );
     let blockChanged = false;
     for (let index = 0; index < nextBlock.length; index++) {
       if (nextBlock[index] !== blockLiteral[index]) blockChanged = true;
@@ -1092,14 +1143,16 @@ export function findLiteralLines(
         added = true;
       }
     }
-    for (const node of reparsed.inlineNodes) {
-      const first = lineIndexAt(starts, node.from);
-      const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
-      if (first === last) continue;
-      collected.push({ from: node.from, to: node.to });
-      for (let index = first; index <= last; index++) multilineLines[index] = true;
-      if (markMultiline) {
-        for (let index = first; index <= last; index++) literal[index] = true;
+    collectInline(
+      reparsed.inlineNodes,
+      reparseRegions.open,
+      reparsedLines,
+      reparsed.barrierNodes,
+      true,
+    );
+    if (markMultiline) {
+      for (let index = 0; index < literal.length; index++) {
+        if (multilineLines[index]) literal[index] = true;
       }
     }
     blockLiteral = nextBlock;

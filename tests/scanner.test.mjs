@@ -202,6 +202,35 @@ const crlfLines = ["x\r", "😀`a\r", "b` *字*"];
 const crlfCodes = [];
 findLiteralLines(crlfLines, { displayBlocks: "standalone", multilineCode: false }, crlfCodes);
 assert.ok(crlfCodes.some((range) => range.from === 5 && range.to === 11));
+// A math-owned backtick must not erase the next real code opener.
+const mathOpenBacktick = ["$`$", "`*字*", "`"];
+const mathOpenCodes = [];
+const mathOpenLiteral = findLiteralLines(
+  mathOpenBacktick,
+  { displayBlocks: "standalone", multilineCode: false },
+  mathOpenCodes,
+);
+assert.deepEqual(mathOpenLiteral, [false, false, false]);
+assert.ok(mathOpenCodes.length > 0);
+// Reparsed code nodes are also checked against inline math.
+const reparseMath = ["$$", "~~~", "$$", "$`$", "*字*`"];
+const reparseCodes = [];
+findLiteralLines(
+  reparseMath,
+  { displayBlocks: "standalone", multilineCode: false },
+  reparseCodes,
+);
+assert.deepEqual(reparseCodes, []);
+// A dollar inside a URL does not disqualify a real code opener.
+const urlDollar = ["[]($)`$", "*字*`"];
+const urlCodes = [];
+findLiteralLines(urlDollar, { displayBlocks: "standalone", multilineCode: false }, urlCodes);
+assert.ok(urlCodes.length > 0);
+// Three consecutive spans must all be collected.
+const threeSpans = ["`", "$$", "`", "`", "$$", "`", "`", "*字*", "`"];
+const threeCodes = [];
+findLiteralLines(threeSpans, { displayBlocks: "standalone", multilineCode: false }, threeCodes);
+assert.ok(threeCodes.length >= 3);
 
 // Tokenizer: code and math ownership in source order.
 const tokenRanges = (text, barriers = []) =>
