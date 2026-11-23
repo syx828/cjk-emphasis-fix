@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import {
   scanLine,
+  scanPreviewLine,
   findSourceFixes,
   findDocumentFixes,
   findExcessParserRanges,
   findLiteralLines,
+  tokenizePreviewLine,
 } from "./scanner.bundle.mjs";
 
 function kinds(text) {
@@ -140,11 +142,79 @@ for (let first = 0; first < recovered.length; first++) {
   }
 }
 
-// Preview can add masks for syntax it does not want to touch.
+// A barrier (URL, tag, title) cannot be crossed by one emphasis span.
 assert.deepEqual(
-  scanLine("**甲** *乙。*续", [{ from: 0, to: 5 }]).matches.map((match) => match.kind),
-  ["em"],
+  scanPreviewLine("[中*](u)文。*后", [{ from: 5, to: 6 }]).matches.map((match) => match.kind),
+  [],
 );
+
+// Tokenizer: code and math ownership in source order.
+const tokenRanges = (text, barriers = []) =>
+  tokenizePreviewLine(text, barriers).map((token) => [token.from, token.to, token.kind]);
+assert.deepEqual(tokenRanges("$$a$$$x$"), [
+  [0, 5, "display"],
+  [5, 8, "inline"],
+]);
+assert.deepEqual(tokenRanges("$$a$b$$*字。*后$x$"), [
+  [0, 7, "display"],
+  [12, 15, "inline"],
+]);
+assert.deepEqual(tokenRanges("[]($$)*字。*后$$", [{ from: 3, to: 5 }]), []);
+assert.deepEqual(tokenRanges("$*字。*后$"), [[0, 7, "inline"]]);
+assert.deepEqual(tokenRanges("$x\\$$"), [[0, 5, "inline"]]);
+assert.deepEqual(tokenRanges("\\$$x$"), [[2, 5, "inline"]]);
+assert.deepEqual(tokenRanges("$a$$"), [[0, 3, "inline"]]);
+assert.deepEqual(tokenRanges("`a`$x$"), [
+  [0, 3, "code"],
+  [3, 6, "inline"],
+]);
+assert.deepEqual(tokenRanges("`$$`"), [[0, 4, "code"]]);
+assert.deepEqual(tokenRanges("$$`$$"), [[0, 5, "display"]]);
+assert.deepEqual(tokenRanges("$$`$$**字。**后"), [[0, 5, "display"]]);
+assert.deepEqual(tokenRanges("`**字。**后``"), []);
+assert.deepEqual(tokenRanges("`*字。*后\\`"), [[0, 8, "code"]]);
+
+// Preview repair follows the tokenizer and keeps prose outside tokens.
+assert.deepEqual(
+  scanPreviewLine("[]($$)*字。*后$$", [{ from: 3, to: 5 }]).matches.map((match) => [
+    match.from,
+    match.to,
+  ]),
+  [[6, 10]],
+);
+assert.deepEqual(
+  scanPreviewLine("$*字$*文。*后").matches.map((match) => [match.from, match.to]),
+  [[4, 8]],
+);
+assert.deepEqual(
+  scanPreviewLine("*$5元。*后").matches.map((match) => [match.from, match.to]),
+  [[0, 6]],
+);
+assert.deepEqual(scanPreviewLine("$*字。*后$").matches, []);
+assert.deepEqual(
+  scanPreviewLine("$$`$$**字。**后").matches.map((match) => [match.from, match.to]),
+  [[5, 11]],
+);
+assert.deepEqual(
+  scanPreviewLine("😀$𠀀$*字。*后").matches.map((match) => [match.from, match.to]),
+  [[6, 10]],
+);
+assert.deepEqual(scanPreviewLine("**加粗含 `code` 的文本。**后续").matches.map((match) => match.kind), [
+  "strong",
+]);
+
+// Entities make the command skip the line instead of splitting `&amp;`.
+assert.equal(findSourceFixes("*字&amp;*后").length, 0);
+assert.equal(findSourceFixes("*字&#65;*后").length, 0);
+// Frontmatter is searched without a line limit.
+const longFrontmatter = [
+  "---",
+  ...Array.from({ length: 205 }, (_, index) => `# comment ${index}`),
+  'a: "*字。*后"',
+  "---",
+  "**字。**后",
+].join("\n");
+assert.equal(findDocumentFixes(longFrontmatter).length, 1);
 
 // The command treats multi-line code lines as literal.
 assert.deepEqual(findLiteralLines(["`a", "b` **字。**后"]), [true, true]);

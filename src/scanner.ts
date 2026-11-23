@@ -192,7 +192,7 @@ function isValidCandidate(
  * legitimately contain inline code (`**see `npm test` for details。**继续`), and
  * splitting the line at every mask would lose such a span entirely.
  */
-function maskDelimiters(text: string, masks: TextMask[]): string {
+function maskDelimiters(text: string, masks: readonly TextMask[]): string {
   if (masks.length === 0) return text;
   const characters = text.split("");
   for (const mask of masks) {
@@ -217,6 +217,7 @@ function scanWithRegex(
   scannable: string,
   pass: ScanPass,
   consumed: TextMask[],
+  barriers: readonly TextMask[] = [],
 ): EmphasisMatch[] {
   const matches: EmphasisMatch[] = [];
   const expression = pass.expression;
@@ -226,6 +227,13 @@ function scanWithRegex(
     const from = match.index;
     const to = from + match[0].length;
     const range = { from, to };
+    if (barriers.some((barrier) => overlaps(barrier, range))) {
+      // Syntax such as a URL, an HTML tag or a link title cannot be crossed by
+      // one emphasis span; the delimiters on either side belong to different
+      // contexts.
+      expression.lastIndex = from + 1;
+      continue;
+    }
     if (consumed.some((item) => overlaps(item, range))) {
       // This match reuses a delimiter that is already part of another span.
       // Resume after the opener so a later span on the same line can still be
@@ -263,7 +271,10 @@ function scanWithRegex(
         continue;
       }
       const extended = { from, to: closerStart + 1 };
-      if (consumed.some((item) => overlaps(item, extended))) {
+      if (
+        barriers.some((barrier) => overlaps(barrier, extended)) ||
+        consumed.some((item) => overlaps(item, extended))
+      ) {
         expression.lastIndex = from + 1;
         continue;
       }
@@ -322,23 +333,192 @@ function findNextDelimiter(
   return -1;
 }
 
-export function scanLine(
+export type InlineTokenKind = "code" | "inline" | "display";
+
+export interface InlineToken extends TextMask {
+  kind: InlineTokenKind;
+}
+
+/** Merge overlapping or touching ranges and sort them. */
+function mergeRanges(ranges: readonly TextMask[]): TextMask[] {
+  const sorted = ranges
+    .filter((range) => range.to > range.from)
+    .sort((a, b) => a.from - b.from);
+  const merged: TextMask[] = [];
+  for (const range of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && range.from <= last.to) {
+      last.to = Math.max(last.to, range.to);
+    } else {
+      merged.push({ from: range.from, to: range.to });
+    }
+  }
+  return merged;
+}
+
+/**
+ * Tokenize one gap between barriers. The gap is the only reachable text: no
+ * opener, closer or escape may look outside it.
+ */
+function tokenizeGap(text: string, start: number, end: number): InlineToken[] {
+  const escaped = (position: number): boolean => {
+    let slashes = 0;
+    let cursor = position - 1;
+    while (cursor >= start && text[cursor] === "\\") {
+      slashes++;
+      cursor--;
+    }
+    return slashes % 2 === 1;
+  };
+
+  const tokens: InlineToken[] = [];
+  let index = start;
+  while (index < end) {
+    const character = text[index];
+    if (character !== "`" && character !== "$") {
+      index++;
+      continue;
+    }
+    if (escaped(index)) {
+      index++;
+      continue;
+    }
+
+    if (character === "`") {
+      let runEnd = index;
+      while (runEnd < end && text[runEnd] === "`") runEnd++;
+      const width = runEnd - index;
+      let cursor = runEnd;
+      let close = -1;
+      while (cursor < end) {
+        if (text[cursor] !== "`") {
+          cursor++;
+          continue;
+        }
+        let candidateEnd = cursor;
+        while (candidateEnd < end && text[candidateEnd] === "`") candidateEnd++;
+        if (candidateEnd - cursor === width) {
+          close = candidateEnd;
+          break;
+        }
+        cursor = candidateEnd;
+      }
+      if (close === -1) {
+        index = runEnd;
+        continue;
+      }
+      tokens.push({ from: index, to: close, kind: "code" });
+      index = close;
+      continue;
+    }
+
+    const display =
+      index + 1 < end && text[index + 1] === "$" && !escaped(index + 1);
+    const width = display ? 2 : 1;
+    const bodyStart = index + width;
+    let cursor = bodyStart;
+    let close = -1;
+    if (display) {
+      while (cursor + 1 < end) {
+        if (
+          text[cursor] === "$" &&
+          !escaped(cursor) &&
+          text[cursor + 1] === "$" &&
+          !escaped(cursor + 1)
+        ) {
+          close = cursor + 2;
+          break;
+        }
+        cursor++;
+      }
+    } else {
+      while (cursor < end) {
+        if (text[cursor] === "$" && !escaped(cursor)) {
+          close = cursor + 1;
+          break;
+        }
+        cursor++;
+      }
+    }
+    if (close === -1) {
+      // Failed owner: consume the opener only; never retry its second dollar.
+      index = bodyStart;
+      continue;
+    }
+    tokens.push({ from: index, to: close, kind: display ? "display" : "inline" });
+    index = close;
+  }
+  return tokens;
+}
+
+/**
+ * Inline code and math tokens for one line, in source order.
+ *
+ * Barriers (URL, HTML tag, link title, entity, wikilink) split the line into
+ * independent gaps; a delimiter can neither open nor close across them. Inside
+ * a gap, `$$` opens display math, `$` opens inline math, and backtick runs pair
+ * by exact width. Escaped delimiters are literal, a failed opener consumes only
+ * itself, and an unclosed span falls back to text. Ownership follows scan
+ * order, so `$$a$$$x$` closes display with `$$` and then opens inline with the
+ * remaining `$`.
+ */
+export function tokenizePreviewLine(
   text: string,
-  extraMasks: readonly TextMask[] = [],
-): { matches: EmphasisMatch[]; masks: TextMask[] } {
-  const masks = [...findMasks(text), ...extraMasks].sort((a, b) => a.from - b.from);
+  barriers: readonly TextMask[] = [],
+): InlineToken[] {
+  const gaps: TextMask[] = [];
+  let cursor = 0;
+  for (const barrier of mergeRanges(barriers)) {
+    const from = Math.max(0, Math.min(text.length, barrier.from));
+    const to = Math.max(0, Math.min(text.length, barrier.to));
+    if (from > cursor) gaps.push({ from: cursor, to: from });
+    cursor = Math.max(cursor, to);
+  }
+  if (cursor < text.length) gaps.push({ from: cursor, to: text.length });
+
+  const tokens: InlineToken[] = [];
+  for (const gap of gaps) {
+    tokens.push(...tokenizeGap(text, gap.from, gap.to));
+  }
+  return tokens;
+}
+
+function scanEmphasis(
+  text: string,
+  masks: readonly TextMask[],
+  barriers: readonly TextMask[],
+): EmphasisMatch[] {
   const scannable = maskDelimiters(text, masks);
   const consumed: TextMask[] = [];
   const matches: EmphasisMatch[] = [];
-
   for (const pass of SCAN_PASSES) {
-    matches.push(...scanWithRegex(text, scannable, pass, consumed));
+    matches.push(...scanWithRegex(text, scannable, pass, consumed, barriers));
   }
+  return matches.sort((a, b) => a.from - b.from);
+}
 
-  return {
-    matches: matches.sort((a, b) => a.from - b.from),
-    masks,
-  };
+/**
+ * Legacy scanner used by the source-rewrite command: its own masks decide what
+ * is code or math.
+ */
+export function scanLine(text: string): {
+  matches: EmphasisMatch[];
+  masks: TextMask[];
+} {
+  const masks = findMasks(text);
+  return { masks, matches: scanEmphasis(text, masks, []) };
+}
+
+/**
+ * Preview scanner: the tokenizer owns code and math, and barriers are syntax an
+ * emphasis span must never cross.
+ */
+export function scanPreviewLine(
+  text: string,
+  barriers: readonly TextMask[] = [],
+): { tokens: InlineToken[]; matches: EmphasisMatch[] } {
+  const tokens = tokenizePreviewLine(text, barriers);
+  return { tokens, matches: scanEmphasis(text, tokens, barriers) };
 }
 
 /**
@@ -430,7 +610,7 @@ export function findSourceFixes(text: string): SourceFix[] {
   // attribute value, a comment), so the whole line is skipped. Inline code and
   // `$$` spans are masked first, so their content does not trip the check.
   const gate = maskDelimiters(text, findMasks(text));
-  if (/[\][<!$|]/.test(gate)) return [];
+  if (/[\][<!$&|]/.test(gate)) return [];
 
   const { matches, masks } = scanLine(text);
   const fixes: SourceFix[] = [];
@@ -574,7 +754,7 @@ function markLines(
 function findFrontmatterEnd(lines: readonly string[]): number {
   if (lines.length === 0) return -1;
   if (lines[0].replace(/\r$/, "") !== "---") return -1;
-  const limit = Math.min(lines.length, 200);
+  const limit = lines.length;
   for (let index = 1; index < limit; index++) {
     const line = lines[index].replace(/\r$/, "").trim();
     if (line === "---" || line === "...") return index;
@@ -660,14 +840,14 @@ export function findLiteralLines(lines: readonly string[]): boolean[] {
   for (let index = 0; index < stripped.length; index++) {
     if (inMathBlock) {
       mathLines[index] = true;
-      if (stripped[index].trimEnd().endsWith("$$")) inMathBlock = false;
+      if (stripMathMarkers(stripped[index]) === "$$") inMathBlock = false;
       continue;
     }
     if (parserLiteral[index] || literal[index]) continue;
     const candidate = stripMathMarkers(stripped[index]);
-    // A line that opens and closes `$$` on its own is a mask for the line
-    // scanner, not a block; only an unclosed opener starts block state.
-    if (candidate.startsWith("$$") && candidate.indexOf("$$", 2) === -1) {
+    // Display math opens only on a standalone `$$` line, the same shape
+    // Obsidian uses for a block; a line such as `$$$a$` is inline text.
+    if (candidate === "$$") {
       mathLines[index] = true;
       inMathBlock = true;
     }

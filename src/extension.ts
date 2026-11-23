@@ -12,7 +12,7 @@ import { getSettings } from "./settings";
 import {
   findExcessParserRanges,
   findLiteralLines,
-  scanLine,
+  scanPreviewLine,
   EmphasisMatch,
   ParserEmphasis,
   TextMask,
@@ -73,25 +73,18 @@ function classesFor(kind: EmphasisMatch["kind"]): string[] {
 }
 
 /** Syntax the decoration pass must not reach into. */
-const PROTECTED_NODES = new Set([
-  "InlineCode",
-  "HTMLTag",
-  "Comment",
-  "Entity",
-  "URL",
-  "LinkTitle",
-]);
+const PROTECTED_NODES = new Set(["HTMLTag", "Comment", "Entity", "URL", "LinkTitle"]);
 
-function collectProtectedRanges(view: EditorView): TextMask[] {
-  const ranges: TextMask[] = [];
+function collectBarriers(view: EditorView): TextMask[] {
+  const barriers: TextMask[] = [];
   syntaxTree(view.state).iterate({
     enter(node) {
       if (PROTECTED_NODES.has(node.name)) {
-        ranges.push({ from: node.from, to: node.to });
+        barriers.push({ from: node.from, to: node.to });
       }
     },
   });
-  return ranges;
+  return barriers;
 }
 
 /** Literal-line map for a whole document, computed once per edit. */
@@ -114,7 +107,7 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
   const decorations: Range<Decoration>[] = [];
   const doc = view.state.doc;
   const parserRanges = collectParserEmphasis(view);
-  const protectedRanges = collectProtectedRanges(view);
+  const barriers = collectBarriers(view);
   const cursorHead = view.state.selection.main.head;
 
   const marks = new Map<string, Decoration>();
@@ -143,19 +136,15 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
   for (const lineNumber of visibleLines) {
     if (literalLines[lineNumber - 1]) continue;
     const line = doc.line(lineNumber);
-    // Dollar math and currency share the same character; pairing them reliably
-    // needs an inline parser, so such lines are left undecorated. This avoids
-    // hiding prose next to math at the cost of a repair on those lines.
-    if (line.text.includes("$")) continue;
     // Table rows are rendered by a widget; decorating them would compete with
     // the cell layout. Require a leading and trailing pipe so ordinary prose
     // that happens to start with "|" is not skipped.
     if (/^\s*\|.*\|\s*$/.test(line.text)) continue;
 
-    const lineMasks: TextMask[] = [];
-    for (const range of protectedRanges) {
+    const lineBarriers: TextMask[] = [];
+    for (const range of barriers) {
       if (range.from >= line.to || range.to <= line.from) continue;
-      lineMasks.push({
+      lineBarriers.push({
         from: Math.max(range.from, line.from) - line.from,
         to: Math.min(range.to, line.to) - line.from,
       });
@@ -163,9 +152,9 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
     const wikilink = /!?\[\[[^\]\n]+\]\]/g;
     let link: RegExpExecArray | null;
     while ((link = wikilink.exec(line.text)) !== null) {
-      lineMasks.push({ from: link.index, to: link.index + link[0].length });
+      lineBarriers.push({ from: link.index, to: link.index + link[0].length });
     }
-    const { matches } = scanLine(line.text, lineMasks);
+    const { matches } = scanPreviewLine(line.text, lineBarriers);
     if (matches.length === 0) continue;
 
     const cursorOnLine = cursorHead >= line.from && cursorHead <= line.to;
