@@ -140,6 +140,12 @@ Related code: `src/scanner.ts` (`findLiteralLines`, `findDocumentFixes`),
   map re-parses with frontmatter, math and multi-line code blanked out so a
   fence inside them cannot hide the rest of the note. Parser emphasis nodes
   are classified by kind and container nodes are excluded from neutralisation.
+- 2026-11-23 (0.4.7): the source rewrite was repeatedly found to edit literal
+  code, link metadata, YAML and comments. It is now gated at document level:
+  a note containing link, HTML, math, comment, inline-code, table or entity
+  syntax (any of `[ ] < ! $ | % &` or a backtick) is refused as a whole, and
+  the setting stays off by default. Live Preview keeps the tokenizer described
+  above. Oracle returned ship for this release candidate.
 
 
 
