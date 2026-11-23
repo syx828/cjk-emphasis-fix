@@ -6,6 +6,7 @@ import {
   findDocumentFixes,
   findExcessParserRanges,
   findLiteralLines,
+  findWikiBarriers,
   tokenizePreviewLine,
   subtractRanges,
 } from "./scanner.bundle.mjs";
@@ -605,5 +606,142 @@ for (const mark of punctuation) {
   assert.equal(fix.length, 1, `fix ${mark}`);
   assert.equal(fix[0].replacement, `**文字**${mark}`, `fix result ${mark}`);
 }
+
+// --- Review blockers: wiki barriers, math-owned backticks, frontmatter and
+// --- one deduplicated code-range resolver. -------------------------------
+
+// Emulate the Live Preview pass: code ranges are clipped per line, wiki
+// barriers are derived from that line, and matches become absolute ranges.
+function previewMatches(lines, codeRanges) {
+  const starts = [];
+  let offset = 0;
+  for (const line of lines) {
+    starts.push(offset);
+    offset += line.length + 1;
+  }
+  const found = [];
+  for (let index = 0; index < lines.length; index++) {
+    const text = lines[index];
+    const lineFrom = starts[index];
+    const code = codeRanges
+      .filter((range) => range.to > lineFrom && range.from < lineFrom + text.length)
+      .map((range) => ({
+        from: Math.max(range.from, lineFrom) - lineFrom,
+        to: Math.min(range.to, lineFrom + text.length) - lineFrom,
+      }));
+    const barriers = findWikiBarriers(text, code);
+    for (const match of scanPreviewLine(text, barriers, code).matches) {
+      found.push([lineFrom + match.from, lineFrom + match.to]);
+    }
+  }
+  return found;
+}
+
+// 1) Shared wiki barrier helper: brackets inside code/math make the match
+// content, a nested URL stays opaque, and a wiki link may contain one token.
+assert.deepEqual(findWikiBarriers("[[a]]"), [{ from: 0, to: 5 }]);
+assert.deepEqual(findWikiBarriers("`[[a]]`"), []);
+assert.deepEqual(findWikiBarriers("[[`x`]]"), [{ from: 0, to: 7 }]);
+assert.deepEqual(findWikiBarriers("[a]((x$y))", [{ from: 3, to: 10 }]), []);
+assert.deepEqual(findWikiBarriers("[[a]](x)", [{ from: 0, to: 5 }]), []);
+// `$` inside a wiki target cannot pair with a dollar outside it, so the
+// backtick after the link opens the multi-line span.
+const wikiDollar = ["[[$]]`$", "*字*`"];
+const wikiDollarBarriers = findWikiBarriers(wikiDollar[0]);
+assert.deepEqual(wikiDollarBarriers, [{ from: 0, to: 5 }]);
+assert.deepEqual(
+  scanPreviewLine(wikiDollar[0], wikiDollarBarriers, [{ from: 5, to: 7 }]).matches,
+  [],
+);
+const wikiDollarCodes = [];
+findLiteralLines(
+  wikiDollar,
+  { displayBlocks: "standalone", multilineCode: false },
+  wikiDollarCodes,
+);
+assert.deepEqual(wikiDollarCodes, [{ from: 5, to: 12 }]);
+assert.deepEqual(previewMatches(wikiDollar, wikiDollarCodes), []);
+
+// 2) A math-owned backtick is blanked before Lezer pairs code spans, so the
+// second backtick opens the multi-line span.
+const mathOwned = ["$`$`", "*字*`"];
+const mathOwnedCodes = [];
+const mathOwnedLiteral = findLiteralLines(
+  mathOwned,
+  { displayBlocks: "standalone", multilineCode: false },
+  mathOwnedCodes,
+);
+assert.deepEqual(mathOwnedLiteral, [false, false]);
+assert.deepEqual(mathOwnedCodes, [{ from: 3, to: 9 }]);
+assert.deepEqual(previewMatches(mathOwned, mathOwnedCodes), []);
+
+// 3) Frontmatter is blanked before the first inline collection: a backtick in
+// YAML cannot seed a range that ends in prose, and the prose stays decorated.
+const yamlBacktick = ["---", 'a: "`"', "...", "*字*`"];
+const yamlCodes = [];
+const yamlLiteral = findLiteralLines(
+  yamlBacktick,
+  { displayBlocks: "standalone", multilineCode: false },
+  yamlCodes,
+);
+assert.deepEqual(yamlLiteral, [true, true, true, false]);
+assert.deepEqual(yamlCodes, []);
+assert.deepEqual(previewMatches(yamlBacktick, yamlCodes), [[15, 18]]);
+
+// 4) One ownership resolver: when a group's `$$` is owned by the code span
+// that opened before it, the next opener is still recognised, and every
+// accepted range appears exactly once.
+const repeatedGroups = [];
+for (let index = 0; index < 5; index++) repeatedGroups.push("`", "$$", "`");
+repeatedGroups.push("`", "*字*", "`");
+assert.equal(repeatedGroups.length, 18);
+const repeatedCodes = [];
+findLiteralLines(
+  repeatedGroups,
+  { displayBlocks: "standalone", multilineCode: false },
+  repeatedCodes,
+);
+assert.deepEqual(repeatedCodes, [
+  { from: 0, to: 6 },
+  { from: 7, to: 13 },
+  { from: 14, to: 20 },
+  { from: 21, to: 27 },
+  { from: 28, to: 34 },
+  { from: 35, to: 42 },
+]);
+
+const deduplicated = ["$$", "~~~", "$$", "`", "$$", "`", "`", "*字*", "`"];
+const deduplicatedCodes = [];
+findLiteralLines(
+  deduplicated,
+  { displayBlocks: "standalone", multilineCode: false },
+  deduplicatedCodes,
+);
+assert.deepEqual(deduplicatedCodes, [
+  { from: 10, to: 16 },
+  { from: 17, to: 24 },
+]);
+
+// 5) Both shapes stay cheap: counts only, never wall-clock times.
+const manyGroups = [];
+for (let index = 0; index < 2000; index++) manyGroups.push("`", "$$", "`");
+const manyCodes = [];
+findLiteralLines(
+  manyGroups,
+  { displayBlocks: "standalone", multilineCode: false },
+  manyCodes,
+);
+assert.equal(manyCodes.length, 2000);
+assert.deepEqual(manyCodes[0], { from: 0, to: 6 });
+assert.deepEqual(manyCodes[manyCodes.length - 1], { from: 13993, to: 13999 });
+
+const singleLineBenchmark = "`a` *字* ".repeat(2000);
+const singleLineCodes = [];
+findLiteralLines(
+  [singleLineBenchmark],
+  { displayBlocks: "standalone", multilineCode: false },
+  singleLineCodes,
+);
+assert.deepEqual(singleLineCodes, []);
 
 console.log("scanner tests: ok");

@@ -483,6 +483,51 @@ export function tokenizePreviewLine(
   return tokens;
 }
 
+/**
+ * Wiki links that may act as barriers on one line.
+ *
+ * A wiki link is recognised by a regex, so its brackets have to be checked
+ * against the code and math tokens the line tokenizer found. A match whose
+ * opening `[` or closing `]` falls inside a token, or inside a supplied
+ * barrier, is that token's content. Tokens that open inside the match and run
+ * past its closer were invented by the link's own delimiters and are ignored.
+ * Interior tokens are allowed, so a link may contain inline code.
+ */
+export function findWikiBarriers(
+  text: string,
+  barriers: readonly TextMask[] = [],
+): TextMask[] {
+  const pattern = /!?\[\[[^\]\n]+\]\]/g;
+  const candidates: TextMask[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    candidates.push({ from: match.index, to: match.index + match[0].length });
+  }
+  if (candidates.length === 0) return [];
+
+  const tokens = tokenizePreviewLine(text, barriers);
+  const merged = mergeRanges(barriers);
+  const insideBarrier = (index: number): boolean =>
+    merged.some((barrier) => barrier.from <= index && index < barrier.to);
+
+  const kept: TextMask[] = [];
+  for (const candidate of candidates) {
+    // `![[x]]` starts at the bang; the bracket itself is one character later.
+    const opening = text[candidate.from] === "!" ? candidate.from + 1 : candidate.from;
+    const closing = candidate.to - 1;
+    const relevant = tokens.filter((token) => {
+      if (token.from >= candidate.to || candidate.from >= token.to) return false;
+      return !(candidate.from < token.from && token.to > candidate.to);
+    });
+    const insideToken = (index: number): boolean =>
+      relevant.some((token) => token.from <= index && index < token.to);
+    if (insideToken(opening) || insideToken(closing)) continue;
+    if (insideBarrier(opening) || insideBarrier(closing)) continue;
+    kept.push(candidate);
+  }
+  return kept;
+}
+
 export function subtractRanges(
   range: TextMask,
   barriers: readonly TextMask[],
@@ -969,7 +1014,81 @@ export function findLiteralLines(
     return { blockNodes, inlineNodes, barrierNodes };
   };
 
-  const parsed = parse(stripped.join("\n"));
+  const blankCharacters = (characters: string[], from: number, to: number): void => {
+    for (let index = Math.max(0, from); index < Math.min(characters.length, to); index++) {
+      if (characters[index] !== "\n") characters[index] = " ";
+    }
+  };
+
+  const lineBarriersFor = (
+    barrierNodes: readonly TextMask[],
+    lineFrom: number,
+    lineLength: number,
+  ): TextMask[] => {
+    const lineBarriers: TextMask[] = [];
+    for (const barrier of barrierNodes) {
+      if (barrier.to <= lineFrom || barrier.from >= lineFrom + lineLength) continue;
+      lineBarriers.push({
+        from: Math.max(barrier.from, lineFrom) - lineFrom,
+        to: Math.min(barrier.to, lineFrom + lineLength) - lineFrom,
+      });
+    }
+    return lineBarriers;
+  };
+
+  /**
+   * Offset-preserving copy of the input in which characters owned by confirmed
+   * math tokens and by frontmatter are spaces. Lezer must never see those
+   * delimiters: a backtick inside inline math, or one inside YAML, would
+   * otherwise open a code span that ends in prose.
+   */
+  const maskMathAndFrontmatter = (
+    textLines: readonly string[],
+    barrierNodes: readonly TextMask[],
+  ): string => {
+    const maskedLines: string[] = [];
+    for (let index = 0; index < textLines.length; index++) {
+      const lineText = textLines[index];
+      if (index <= frontmatterEnd) {
+        maskedLines.push(" ".repeat(lineText.length));
+        continue;
+      }
+      if (lineText.length === 0) {
+        maskedLines.push("");
+        continue;
+      }
+      const lineFrom = starts[index];
+      const lineBarriers = lineBarriersFor(barrierNodes, lineFrom, lineText.length);
+      // A dollar inside a wiki target must not pair with one outside it.
+      const wikiBarriers = findWikiBarriers(lineText, lineBarriers);
+      const tokens = tokenizePreviewLine(lineText, [...lineBarriers, ...wikiBarriers]);
+      const characters = lineText.split("");
+      for (const token of tokens) {
+        if (token.kind === "code") continue;
+        for (let cursor = Math.max(0, token.from); cursor < Math.min(characters.length, token.to); cursor++) {
+          characters[cursor] = " ";
+        }
+      }
+      maskedLines.push(characters.join(""));
+    }
+    return maskedLines.join("\n");
+  };
+
+  /** Block nodes come from the normal parse; code candidates from the masked one. */
+  const parseDocument = (
+    text: string,
+    textLines: readonly string[],
+  ): { blockNodes: TextMask[]; inlineNodes: TextMask[]; barrierNodes: TextMask[] } => {
+    const normal = parse(text);
+    const inline = parse(maskMathAndFrontmatter(textLines, normal.barrierNodes));
+    return {
+      blockNodes: normal.blockNodes,
+      inlineNodes: inline.inlineNodes,
+      barrierNodes: normal.barrierNodes,
+    };
+  };
+
+  const parsed = parseDocument(stripped.join("\n"), stripped);
   const parserLiteral = new Array<boolean>(lines.length).fill(false);
   for (const node of parsed.blockNodes) {
     markLines(parserLiteral, starts, node.from, node.to);
@@ -980,84 +1099,163 @@ export function findLiteralLines(
     literal[index] = true;
   }
 
-  // Multi-line inline code: collect the ranges this classifier recognises.
-  // The command marks their lines literal; Live Preview masks only the code
-  // characters and scans the rest. Spans that start inside an open display
-  // block are math content, not code.
-  const collected: TextMask[] = [];
+  // Multi-line inline code: one ownership resolver. The command marks accepted
+  // lines literal; Live Preview masks only the code characters and scans the
+  // rest. Accepted ranges are keyed by opener so a later reparse can never add
+  // a second span that reuses an opener already owned.
+  const acceptedByFrom = new Map<number, TextMask>();
+  const acceptedFroms: number[] = [];
   const multilineLines = new Array<boolean>(lines.length).fill(false);
   const baseSkip = parserLiteral.map(
     (value, index) => value || index <= frontmatterEnd,
   );
+
+  const addAccepted = (from: number, to: number): boolean => {
+    if (acceptedByFrom.has(from)) return false;
+    let low = 0;
+    let high = acceptedFroms.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (acceptedFroms[middle] < from) low = middle + 1;
+      else high = middle;
+    }
+    // A conflicting provisional span is rejected instead of appended: the
+    // line map would otherwise hold two owners for the same characters.
+    const previous = low > 0 ? acceptedByFrom.get(acceptedFroms[low - 1]) : undefined;
+    if (previous && previous.to > from) return false;
+    const following = acceptedByFrom.get(acceptedFroms[low]);
+    if (following && following.from < to) return false;
+    acceptedByFrom.set(from, { from, to });
+    acceptedFroms.splice(low, 0, from);
+    for (
+      let index = lineIndexAt(starts, from);
+      index < multilineLines.length && starts[index] < to;
+      index++
+    ) {
+      multilineLines[index] = true;
+    }
+    return true;
+  };
+
+  /** Already-accepted code owns this offset: a new opener there is content. */
+  const isInsideAcceptedCode = (offset: number): boolean => {
+    let low = 0;
+    let high = acceptedFroms.length - 1;
+    let found = -1;
+    while (low <= high) {
+      const middle = (low + high) >> 1;
+      if (acceptedFroms[middle] <= offset) {
+        found = middle;
+        low = middle + 1;
+      } else {
+        high = middle - 1;
+      }
+    }
+    if (found === -1) return false;
+    const range = acceptedByFrom.get(acceptedFroms[found]);
+    return range !== undefined && range.to > offset;
+  };
+
+  /**
+   * Display-math ownership for one candidate order. The scan is advanced only
+   * up to the line of the candidate being decided, so accepted code lines are
+   * already known when the scanner reaches them and their `$$` cannot open a
+   * block. This keeps the pass linear and single.
+   */
+  const createMathTracker = (
+    sourceLines: readonly string[],
+    skipLines: readonly boolean[],
+  ): { owned: boolean[]; advanceTo: (lineIndex: number) => void } => {
+    const owned = new Array<boolean>(sourceLines.length).fill(false);
+    let cursor = 0;
+    let inBlock = false;
+    const advanceTo = (lineIndex: number): void => {
+      while (cursor <= lineIndex && cursor < sourceLines.length) {
+        const index = cursor;
+        const line = sourceLines[index].replace(/\r$/, "");
+        if (inBlock) {
+          owned[index] = true;
+          const closes = standaloneDisplay
+            ? stripMathMarkers(line).trimEnd().endsWith("$$")
+            : line.trimEnd().endsWith("$$");
+          if (closes) inBlock = false;
+        } else if (!skipLines[index] && !multilineLines[index]) {
+          const candidate = stripMathMarkers(line);
+          const opens = standaloneDisplay
+            ? candidate === "$$"
+            : candidate.startsWith("$$") && candidate.indexOf("$$", 2) === -1;
+          if (opens) {
+            owned[index] = true;
+            inBlock = true;
+          }
+        }
+        cursor++;
+      }
+    };
+    return { owned, advanceTo };
+  };
+
   const collectInline = (
     nodes: readonly TextMask[],
-    open: readonly boolean[],
-    textLines: readonly string[],
+    sourceLines: readonly string[],
+    skipLines: readonly boolean[],
     barrierNodes: readonly TextMask[],
-    append = false,
   ): void => {
-    if (!append) {
-      multilineLines.fill(false);
-      collected.length = 0;
-    }
+    const tracker = createMathTracker(sourceLines, skipLines);
     const tokenCache = new Map<number, InlineToken[]>();
     const tokensForLine = (lineIndex: number): InlineToken[] => {
       const cached = tokenCache.get(lineIndex);
       if (cached) return cached;
       const lineFrom = starts[lineIndex];
-      const lineText = textLines[lineIndex] ?? "";
-      const lineBarriers: TextMask[] = [];
-      for (const barrier of barrierNodes) {
-        if (barrier.to <= lineFrom || barrier.from >= lineFrom + lineText.length) continue;
-        lineBarriers.push({
-          from: Math.max(barrier.from, lineFrom) - lineFrom,
-          to: Math.min(barrier.to, lineFrom + lineText.length) - lineFrom,
-        });
-      }
-      const tokens = tokenizePreviewLine(lineText, lineBarriers);
+      const lineText = sourceLines[lineIndex] ?? "";
+      const lineBarriers = lineBarriersFor(barrierNodes, lineFrom, lineText.length);
+      const wikiBarriers = findWikiBarriers(lineText, lineBarriers);
+      const tokens = tokenizePreviewLine(lineText, [...lineBarriers, ...wikiBarriers]);
       tokenCache.set(lineIndex, tokens);
       return tokens;
     };
-    for (const node of nodes) {
+    // Source order is what gives one delimiter one owner.
+    const ordered = [...nodes].sort((a, b) => a.from - b.from);
+    for (const node of ordered) {
       const first = lineIndexAt(starts, node.from);
       const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
       // Single-line spans are the line tokenizer's business; check this before
       // tokenizing so a line with many spans is not retokenized per span.
       if (first === last) continue;
+      if (first <= frontmatterEnd) continue;
+      if (isInsideAcceptedCode(node.from)) continue;
       const column = node.from - starts[first];
-      if (startsInsideDisplayMath(stripped, open, first, column, standaloneDisplay)) continue;
+      tracker.advanceTo(first);
+      if (startsInsideDisplayMath(sourceLines, tracker.owned, first, column, standaloneDisplay)) {
+        continue;
+      }
       const insideMath = tokensForLine(first).some(
         (token) => token.kind !== "code" && token.from <= column && column < token.to,
       );
       if (insideMath) continue;
-      collected.push({ from: node.from, to: node.to });
-      for (let index = first; index <= last; index++) multilineLines[index] = true;
+      addAccepted(node.from, node.to);
     }
   };
-  let regions = mathRegions(stripped, starts, standaloneDisplay, baseSkip);
-  for (let pass = 0; pass < 5; pass++) {
-    collectInline(parsed.inlineNodes, regions.open, stripped, parsed.barrierNodes);
-    const skip = baseSkip.map((value, index) => value || multilineLines[index]);
-    const next = mathRegions(stripped, starts, standaloneDisplay, skip);
-    if (next.open.every((value, index) => value === regions.open[index])) break;
-    regions = next;
-  }
+  collectInline(parsed.inlineNodes, stripped, baseSkip, parsed.barrierNodes);
   if (markMultiline) {
     for (let index = 0; index < literal.length; index++) {
       if (multilineLines[index]) literal[index] = true;
     }
   }
-  const { ends: blockEnds } = regions;
+  const { ends: blockEnds } = mathRegions(
+    stripped,
+    starts,
+    standaloneDisplay,
+    baseSkip.map((value, index) => value || multilineLines[index]),
+  );
 
   // `$$` blocks are Obsidian syntax the parser does not know. They are found
   // line by line, and the document is reparsed after blanking them so a fence
   // inside math or frontmatter cannot suppress a later opener. The loop runs
   // until neither parse adds a new literal line.
   const characters = stripped.join("\n").split("");
-  const blankRange = (from: number, to: number) => {
-    for (let index = Math.max(0, from); index < Math.min(characters.length, to); index++) {
-      if (characters[index] !== "\n") characters[index] = " ";
-    }
+  const blankRange = (from: number, to: number): void => {
+    blankCharacters(characters, from, to);
   };
   for (let index = 0; index <= frontmatterEnd && index < stripped.length; index++) {
     blankRange(starts[index], starts[index] + stripped[index].length);
@@ -1066,10 +1264,10 @@ export function findLiteralLines(
     const first = lineIndexAt(starts, node.from);
     const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
     if (first === last) continue;
-    const key = `${node.from}:${node.to}`;
-    if (collected.some((range) => `${range.from}:${range.to}` === key)) {
+    const accepted = acceptedByFrom.get(node.from);
+    if (accepted) {
       const end =
-        blockEnds[first] >= 0 ? Math.min(node.to, blockEnds[first]) : node.to;
+        blockEnds[first] >= 0 ? Math.min(accepted.to, blockEnds[first]) : accepted.to;
       blankRange(node.from, end);
       continue;
     }
@@ -1120,20 +1318,14 @@ export function findLiteralLines(
     }
 
     const reparsedText = characters.join("");
-    const reparsed = parse(reparsedText);
     const reparsedLines = reparsedText.split("\n");
+    const reparsed = parseDocument(reparsedText, reparsedLines);
     const nextBlock = new Array<boolean>(lines.length).fill(false);
     for (const node of reparsed.blockNodes) {
       markLines(nextBlock, starts, node.from, node.to);
     }
     const reparseSkip = nextBlock.map(
       (value, index) => value || index <= frontmatterEnd,
-    );
-    const reparseRegions = mathRegions(
-      reparsedLines,
-      starts,
-      standaloneDisplay,
-      reparseSkip,
     );
     let blockChanged = false;
     for (let index = 0; index < nextBlock.length; index++) {
@@ -1143,13 +1335,7 @@ export function findLiteralLines(
         added = true;
       }
     }
-    collectInline(
-      reparsed.inlineNodes,
-      reparseRegions.open,
-      reparsedLines,
-      reparsed.barrierNodes,
-      true,
-    );
+    collectInline(reparsed.inlineNodes, reparsedLines, reparseSkip, reparsed.barrierNodes);
     if (markMultiline) {
       for (let index = 0; index < literal.length; index++) {
         if (multilineLines[index]) literal[index] = true;
@@ -1165,7 +1351,8 @@ export function findLiteralLines(
       const delta = originalStarts[index] - starts[index];
       return offset + delta + (index === 0 ? bomOffset : 0);
     };
-    for (const range of collected) {
+    const accepted = [...acceptedByFrom.values()].sort((a, b) => a.from - b.from);
+    for (const range of accepted) {
       codeRanges.push({ from: toOriginal(range.from), to: toOriginal(range.to) });
     }
   }

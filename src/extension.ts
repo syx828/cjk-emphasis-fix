@@ -12,6 +12,7 @@ import { getSettings } from "./settings";
 import {
   findExcessParserRanges,
   findLiteralLines,
+  findWikiBarriers,
   scanPreviewLine,
   subtractRanges,
   EmphasisMatch,
@@ -180,15 +181,6 @@ function buildDecorations(
         to: Math.min(range.to, line.to) - line.from,
       });
     }
-    // Wiki links are recognised by a regex, not a parser. A match that falls
-    // inside a code or math token is that token's content, and one that spans
-    // two tokens is not a wiki link at all, so filter before tokenizing again.
-    const wikiCandidates: TextMask[] = [];
-    const wikilink = /!?\[\[[^\]\n]+\]\]/g;
-    let link: RegExpExecArray | null;
-    while ((link = wikilink.exec(line.text)) !== null) {
-      wikiCandidates.push({ from: link.index, to: link.index + link[0].length });
-    }
     const rawTokens = scanPreviewLine(line.text, [], lineCode).tokens;
     const filteredBase = baseBarriers.filter(
       (barrier) =>
@@ -199,28 +191,12 @@ function buildDecorations(
             barrier.to <= token.to,
         ),
     );
-    const initial = scanPreviewLine(line.text, filteredBase, lineCode);
-    // A token that straddles a wiki candidate is not real code/math: the link
-    // owns those characters. Drop such tokens, then decide the candidate:
-    // inside a surviving token → code content; spanning two or more tokens →
-    // an invented link; otherwise it is a link that may contain one token.
+    // Wiki links are recognised by a regex, not a parser; the shared helper
+    // drops matches that are really code or math content. They are barriers so
+    // a delimiter inside a link target cannot pair with prose outside it.
     const lineBarriers = [
       ...filteredBase,
-      ...wikiCandidates.filter((candidate) => {
-        const relevant = initial.tokens.filter((token) => {
-          if (token.from >= candidate.to || candidate.from >= token.to) {
-            return false;
-          }
-          // A token that opens inside the link and runs past its closer is a
-          // bogus pairing created by the link's own delimiters.
-          return !(candidate.from < token.from && token.to > candidate.to);
-        });
-        const bracketInsideToken = (index: number): boolean =>
-          relevant.some((token) => token.from <= index && index < token.to);
-        // Classify by where the brackets fall: a bracket inside code/math means
-        // the "link" is content. Interior tokens are allowed (link with code).
-        return !bracketInsideToken(candidate.from) && !bracketInsideToken(candidate.to - 1);
-      }),
+      ...findWikiBarriers(line.text, [...filteredBase, ...lineCode]),
     ];
     const { tokens, matches } = scanPreviewLine(line.text, lineBarriers, lineCode);
     if (matches.length === 0) continue;
