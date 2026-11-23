@@ -259,6 +259,9 @@ assert.equal(findDocumentFixes("$$\n`\n$$\n`\n` [](\n*字。*x\n)\n").length, 0)
 assert.equal(findDocumentFixes("$$`\nb$$\n$$\n`\n*字。*x\n$$\n").length, 0);
 assert.equal(findDocumentFixes("---\na: \"`x` %%\"\n---\n%%\n*字。*x\n%%\n").length, 0);
 assert.equal(findDocumentFixes("$$%%$$\n%%\n*字。*x\n%%\n").length, 0);
+assert.equal(findDocumentFixes("$$\n`\n$$\n`*字。*x\n`\n").length, 0);
+assert.equal(findDocumentFixes("~~~\n$$\n~~~\n`*字。*x\n`\n").length, 0);
+assert.equal(findDocumentFixes("[]($) %% $\n*字。*x\n%%\n").length, 0);
 // A wiki link containing a code token stays a barrier.
 assert.deepEqual(scanPreviewLine("[[`x`*字*]]", [{ from: 0, to: 10 }]).matches, []);
 

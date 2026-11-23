@@ -159,10 +159,18 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
     while ((link = wikilink.exec(line.text)) !== null) {
       wikiCandidates.push({ from: link.index, to: link.index + link[0].length });
     }
-    const initial = scanPreviewLine(line.text, baseBarriers);
+    const rawTokens = scanPreviewLine(line.text, []).tokens;
+    const filteredBase = baseBarriers.filter(
+      (barrier) =>
+        !rawTokens.some(
+          (token) => token.from <= barrier.from && barrier.to <= token.to,
+        ),
+    );
+    const initial = scanPreviewLine(line.text, filteredBase);
     // A token that straddles a wiki candidate is not real code/math: the link
-    // owns those characters. Drop such tokens, then keep a candidate unless a
-    // surviving token fully contains it (text inside code is code content).
+    // owns those characters. Drop such tokens, then decide the candidate:
+    // inside a surviving token → code content; spanning two or more tokens →
+    // an invented link; otherwise it is a link that may contain one token.
     const validTokens = initial.tokens.filter(
       (token) =>
         !wikiCandidates.some(
@@ -173,13 +181,20 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
         ),
     );
     const lineBarriers = [
-      ...baseBarriers,
-      ...wikiCandidates.filter(
-        (candidate) =>
-          !validTokens.some(
+      ...filteredBase,
+      ...wikiCandidates.filter((candidate) => {
+        const overlapping = validTokens.filter(
+          (token) => token.from < candidate.to && candidate.from < token.to,
+        );
+        if (
+          overlapping.some(
             (token) => token.from <= candidate.from && candidate.to <= token.to,
-          ),
-      ),
+          )
+        ) {
+          return false;
+        }
+        return overlapping.length < 2;
+      }),
     ];
     const { tokens, matches } = scanPreviewLine(line.text, lineBarriers);
     if (matches.length === 0) continue;
