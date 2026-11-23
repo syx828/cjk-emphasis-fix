@@ -794,9 +794,9 @@ function findFrontmatterEnd(lines: readonly string[]): number {
   const limit = lines.length;
   for (let index = 1; index < limit; index++) {
     const line = lines[index].replace(/\r$/, "");
-    // The closing delimiter must sit at column zero; an indented `---` is a
-    // block-scalar value, not the end of the frontmatter.
-    if (line === "---" || line === "...") return index;
+    // The closing delimiter must start at column zero; an indented `---` is a
+    // block-scalar value. Trailing spaces and tabs are allowed.
+    if (/^(?:---|\.\.\.)[ \t]*$/.test(line)) return index;
   }
   return -1;
 }
@@ -823,6 +823,29 @@ function stripMathMarkers(line: string): string {
     if (next === value) return value;
     value = next;
   }
+}
+
+function startsInsideDisplayMath(
+  lines: readonly string[],
+  firstLine: number,
+  standalone: boolean,
+): boolean {
+  let inMath = false;
+  for (let index = 0; index < firstLine; index++) {
+    const candidate = stripMathMarkers(lines[index].replace(/\r$/, ""));
+    if (inMath) {
+      const closes = standalone
+        ? candidate === "$$"
+        : candidate.trimEnd().endsWith("$$");
+      if (closes) inMath = false;
+      continue;
+    }
+    const opens = standalone
+      ? candidate === "$$"
+      : candidate.startsWith("$$") && candidate.indexOf("$$", 2) === -1;
+    if (opens) inMath = true;
+  }
+  return inMath;
 }
 
 export interface LiteralOptions {
@@ -880,6 +903,7 @@ export function findLiteralLines(
   // on one line is handled by the per-line masks.
   for (const node of parsed.inlineNodes) {
     const first = lineIndexAt(starts, node.from);
+    if (startsInsideDisplayMath(stripped, first, standaloneDisplay)) continue;
     const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
     if (first === last) continue;
     for (let index = first; index <= last; index++) literal[index] = true;
@@ -900,6 +924,7 @@ export function findLiteralLines(
   }
   for (const node of parsed.inlineNodes) {
     const first = lineIndexAt(starts, node.from);
+    if (startsInsideDisplayMath(stripped, first, standaloneDisplay)) continue;
     const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
     if (first !== last) blankRange(node.from, node.to);
   }
@@ -1012,11 +1037,43 @@ export function findDocumentFixes(text: string): SourceFix[] {
   const fixes: SourceFix[] = [];
   const lines = text.split("\n");
   const literal = findLiteralLines(lines);
-  // Parse the same literal-aware view the classifier used: a fence inside math
-  // or frontmatter must not hide a later URL or comment from the barrier pass.
-  const masked = lines
-    .map((line, index) => (literal[index] ? line.replace(/[^\r\n]/g, " ") : line))
-    .join("\n");
+  // Mask by ranges, not whole lines: a line that ends a multi-line code span
+  // can also hold a link opener, and blanking it wholesale would hide that
+  // syntax from the barrier pass. Code/math/frontmatter ranges are blanked;
+  // literal lines with no parser range (math, frontmatter) are blanked whole.
+  const starts = lineStartsFor(lines);
+  const documentTree = markdownParser.parse(text);
+  const inlineRanges: TextMask[] = [];
+  documentTree.iterate({
+    enter(node) {
+      if (node.name === "InlineCode") {
+        inlineRanges.push({ from: node.from, to: node.to });
+      }
+    },
+  });
+  const usableInline = inlineRanges.filter(
+    (range) =>
+      !startsInsideDisplayMath(lines, lineIndexAt(starts, range.from), false),
+  );
+  const characters = text.split("");
+  const blankRange = (from: number, to: number): void => {
+    for (let index = Math.max(0, from); index < Math.min(characters.length, to); index++) {
+      if (characters[index] !== "\n") characters[index] = " ";
+    }
+  };
+  for (const range of usableInline) blankRange(range.from, range.to);
+  for (let index = 0; index < lines.length; index++) {
+    if (!literal[index]) continue;
+    const lineFrom = starts[index];
+    const lineTo = lineFrom + lines[index].length;
+    // A line that ends a multi-line code span can also hold link syntax; only
+    // the code characters are blanked there, never the whole line.
+    const touched = usableInline.some(
+      (range) => range.from < lineTo && lineFrom < range.to,
+    );
+    if (!touched) blankRange(lineFrom, lineTo);
+  }
+  const masked = characters.join("");
   const barriers = [...findDocumentBarriers(masked), ...findCommentRanges(masked)];
   let lineFrom = 0;
 

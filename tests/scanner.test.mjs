@@ -251,6 +251,13 @@ assert.equal(findDocumentFixes("%%\n*字。*x\n%%\n").length, 0);
 assert.equal(findDocumentFixes("$$\n~~~\n$$\n$$\n```\n$$\n```\n*字。*x\n```\n").length, 0);
 assert.equal(findDocumentFixes("$$\n```\n$$\n[a](\n*字。*x\n)\n").length, 0);
 assert.equal(findDocumentFixes("---\na: |\n  ---\n  *字。*x\n---\n").length, 0);
+assert.equal(findDocumentFixes("$$\n`\n$$\n$$\n`\n*字。*x\n$$\n").length, 0);
+assert.equal(findDocumentFixes("`\n` [](\n*字。*x\n)\n").length, 0);
+assert.equal(findDocumentFixes("`%%`\n%%\n*字。*x\n%%\n").length, 0);
+assert.equal(findDocumentFixes("---\ns: \"*字。*x\"\n--- \n").length, 0);
+// A wiki link containing a code token stays a barrier.
+assert.deepEqual(scanPreviewLine("[[`x`*字*]]", [{ from: 0, to: 10 }]).matches, []);
+
 
 // A wiki-link-looking match inside code is code content; one spanning two code
 // spans is not a wiki link and must not suppress the prose between them.

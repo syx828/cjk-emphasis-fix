@@ -162,12 +162,18 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
     const initial = scanPreviewLine(line.text, baseBarriers);
     const lineBarriers = [
       ...baseBarriers,
-      ...wikiCandidates.filter(
-        (candidate) =>
-          !initial.tokens.some(
-            (token) => token.from < candidate.to && candidate.from < token.to,
-          ),
-      ),
+      ...wikiCandidates.filter((candidate) => {
+        for (const token of initial.tokens) {
+          if (token.from >= candidate.to || candidate.from >= token.to) continue;
+          const candidateInside = token.from <= candidate.from && candidate.to <= token.to;
+          const tokenInside = candidate.from <= token.from && token.to <= candidate.to;
+          // Text inside code/math is that token's content; a partial overlap is
+          // not a wiki link. A token wholly inside the link is fine: the link
+          // owns it and stays a barrier.
+          if (candidateInside || !tokenInside) return false;
+        }
+        return true;
+      }),
     ];
     const { tokens, matches } = scanPreviewLine(line.text, lineBarriers);
     if (matches.length === 0) continue;
