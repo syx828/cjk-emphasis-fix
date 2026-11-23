@@ -567,10 +567,10 @@ export function trailingPunctuationLength(text: string, from: number, to: number
   while (cursor > from) {
     const code = codePointBefore(text, cursor);
     if (code === undefined || !isPunctuation(code)) break;
-    // Underscores and asterisks are emphasis delimiters, not prose
-    // punctuation. Moving an inner `_` across the outer marker would break
-    // the nested span, so the walk stops there.
-    if (code === 0x5f || code === 0x2a) break;
+    // Underscores, asterisks, equals signs and tildes are emphasis delimiters,
+    // not prose punctuation. Moving one of them across the outer marker would
+    // break a nested span, so the walk stops there.
+    if (code === 0x5f || code === 0x2a || code === 0x3d || code === 0x7e) break;
     cursor -= code > 0xffff ? 2 : 1;
   }
   return to - cursor;
@@ -661,6 +661,9 @@ export function findSourceFixes(text: string): SourceFix[] {
     // would rewrite what the code span contains.
     if (overlapsAnyMask(masks, punctuationFrom, match.contentTo)) continue;
     if (contentWithoutPunctuation.length === 0) continue;
+    // A body made only of markers is malformed; rewriting it would join the
+    // delimiter runs into literal stars.
+    if (/^[*_~=\s]*$/.test(contentWithoutPunctuation)) continue;
     // Moving the closer past a nested underscore delimiter would change which
     // marker owns the inner span; leave such lines alone.
     if (contentWithoutPunctuation.includes("_")) continue;
@@ -790,7 +793,9 @@ function findFrontmatterEnd(lines: readonly string[]): number {
   if (lines[0].replace(/\r$/, "").replace(/^\uFEFF/, "") !== "---") return -1;
   const limit = lines.length;
   for (let index = 1; index < limit; index++) {
-    const line = lines[index].replace(/\r$/, "").trim();
+    const line = lines[index].replace(/\r$/, "");
+    // The closing delimiter must sit at column zero; an indented `---` is a
+    // block-scalar value, not the end of the frontmatter.
     if (line === "---" || line === "...") return index;
   }
   return -1;
@@ -929,9 +934,13 @@ export function findLiteralLines(
     let added = false;
     const math = scanMath(blockLiteral);
     for (let index = 0; index < math.length; index++) {
-      if (math[index] && !literal[index]) {
+      if (!math[index]) continue;
+      // Blank every math line, including lines an earlier pass marked literal
+      // by a wrong block classification; otherwise a fence inside math keeps
+      // splitting the rest of the document.
+      blankRange(starts[index], starts[index] + stripped[index].length);
+      if (!literal[index]) {
         literal[index] = true;
-        blankRange(starts[index], starts[index] + stripped[index].length);
         added = true;
       }
     }
@@ -984,11 +993,31 @@ function findDocumentBarriers(text: string): TextMask[] {
   return barriers;
 }
 
+/** `%%...%%` comments, possibly spanning lines. */
+function findCommentRanges(text: string): TextMask[] {
+  const ranges: TextMask[] = [];
+  let index = 0;
+  while (index < text.length) {
+    const open = text.indexOf("%%", index);
+    if (open === -1) break;
+    const close = text.indexOf("%%", open + 2);
+    if (close === -1) break;
+    ranges.push({ from: open, to: close + 2 });
+    index = close + 2;
+  }
+  return ranges;
+}
+
 export function findDocumentFixes(text: string): SourceFix[] {
   const fixes: SourceFix[] = [];
   const lines = text.split("\n");
   const literal = findLiteralLines(lines);
-  const barriers = findDocumentBarriers(text);
+  // Parse the same literal-aware view the classifier used: a fence inside math
+  // or frontmatter must not hide a later URL or comment from the barrier pass.
+  const masked = lines
+    .map((line, index) => (literal[index] ? line.replace(/[^\r\n]/g, " ") : line))
+    .join("\n");
+  const barriers = [...findDocumentBarriers(masked), ...findCommentRanges(masked)];
   let lineFrom = 0;
 
   for (let index = 0; index < lines.length; index++) {

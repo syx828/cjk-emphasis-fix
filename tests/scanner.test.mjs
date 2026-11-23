@@ -240,6 +240,26 @@ assert.equal(
   findDocumentFixes("\uFEFF---\na: \"*字。*后\"\n---\n**字。**后\n").length,
   1,
 );
+const nestedHighlight = findDocumentFixes("*==字==。*x\n");
+assert.equal(nestedHighlight.length, 1);
+assert.equal(nestedHighlight[0].replacement, "*==字==*。");
+const nestedStrike = findDocumentFixes("*~~字~~。*x\n");
+assert.equal(nestedStrike.length, 1);
+assert.equal(nestedStrike[0].replacement, "*~~字~~*。");
+assert.equal(findDocumentFixes("****。**x\n").length, 0);
+assert.equal(findDocumentFixes("%%\n*字。*x\n%%\n").length, 0);
+assert.equal(findDocumentFixes("$$\n~~~\n$$\n$$\n```\n$$\n```\n*字。*x\n```\n").length, 0);
+assert.equal(findDocumentFixes("$$\n```\n$$\n[a](\n*字。*x\n)\n").length, 0);
+assert.equal(findDocumentFixes("---\na: |\n  ---\n  *字。*x\n---\n").length, 0);
+
+// A wiki-link-looking match inside code is code content; one spanning two code
+// spans is not a wiki link and must not suppress the prose between them.
+assert.deepEqual(scanPreviewLine("`[[a]]*字*`").matches, []);
+assert.deepEqual(
+  scanPreviewLine("`[[` *字。* `]]`").matches.map((match) => [match.from, match.to]),
+  [[5, 9]],
+);
+
 
 assert.equal(findSourceFixes("*字&amp;*后").length, 0);
 assert.equal(findSourceFixes("*字&#65;*后").length, 0);

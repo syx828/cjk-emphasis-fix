@@ -142,19 +142,33 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
     // that happens to start with "|" is not skipped.
     if (/^\s*\|.*\|\s*$/.test(line.text)) continue;
 
-    const lineBarriers: TextMask[] = [];
+    const baseBarriers: TextMask[] = [];
     for (const range of barriers) {
       if (range.from >= line.to || range.to <= line.from) continue;
-      lineBarriers.push({
+      baseBarriers.push({
         from: Math.max(range.from, line.from) - line.from,
         to: Math.min(range.to, line.to) - line.from,
       });
     }
+    // Wiki links are recognised by a regex, not a parser. A match that falls
+    // inside a code or math token is that token's content, and one that spans
+    // two tokens is not a wiki link at all, so filter before tokenizing again.
+    const wikiCandidates: TextMask[] = [];
     const wikilink = /!?\[\[[^\]\n]+\]\]/g;
     let link: RegExpExecArray | null;
     while ((link = wikilink.exec(line.text)) !== null) {
-      lineBarriers.push({ from: link.index, to: link.index + link[0].length });
+      wikiCandidates.push({ from: link.index, to: link.index + link[0].length });
     }
+    const initial = scanPreviewLine(line.text, baseBarriers);
+    const lineBarriers = [
+      ...baseBarriers,
+      ...wikiCandidates.filter(
+        (candidate) =>
+          !initial.tokens.some(
+            (token) => token.from < candidate.to && candidate.from < token.to,
+          ),
+      ),
+    ];
     const { tokens, matches } = scanPreviewLine(line.text, lineBarriers);
     if (matches.length === 0) continue;
 
