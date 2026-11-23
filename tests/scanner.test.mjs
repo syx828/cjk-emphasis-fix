@@ -143,7 +143,22 @@ for (let first = 0; first < recovered.length; first++) {
   }
 }
 
-// A barrier (URL, tag, title) cannot be crossed by one emphasis span.
+// A multi-line code closing marker is masked by the caller, so the rest of the
+// line is still scanned; without the mask the stray backtick pairs forward.
+const boundaryLine = "b` *字。*后 `x`";
+assert.deepEqual(scanPreviewLine(boundaryLine).matches, []);
+assert.deepEqual(
+  scanPreviewLine(boundaryLine, [], [{ from: 1, to: 2 }]).matches.map((match) => [
+    match.from,
+    match.to,
+  ]),
+  [[3, 7]],
+);
+assert.deepEqual(findLiteralLines(["`a", "b` *字。*后"], { multilineCode: false }), [
+  false,
+  false,
+]);
+
 assert.deepEqual(
   scanPreviewLine("[中*](u)文。*后", [{ from: 5, to: 6 }]).matches.map((match) => match.kind),
   [],
@@ -425,6 +440,28 @@ assert.deepEqual(
     10,
   ),
   [{ from: 5, to: 6 }],
+);
+// A different kind is a nested construct, not overflow.
+assert.deepEqual(
+  findExcessParserRanges(
+    [{ to: 6, delimiterLength: 2, kind: "strong" }],
+    [{ from: 0, to: 8, kind: "em" }],
+    "xxxxxxxx",
+    0,
+    10,
+  ),
+  [],
+);
+// A second single-marker span starting just after the closer is separate.
+assert.deepEqual(
+  findExcessParserRanges(
+    [{ to: 4, delimiterLength: 1, kind: "em" }],
+    [{ from: 5, to: 6, kind: "em" }],
+    "xxxxx",
+    0,
+    10,
+  ),
+  [],
 );
 
 const overflowText = "x".repeat(200);
