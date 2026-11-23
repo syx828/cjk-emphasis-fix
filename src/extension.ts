@@ -165,7 +165,7 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
         !rawTokens.some(
           (token) =>
             token.kind === "code" &&
-            token.from <= barrier.from &&
+            token.from < barrier.from &&
             barrier.to <= token.to,
         ),
     );

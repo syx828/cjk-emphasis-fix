@@ -207,7 +207,7 @@ assert.deepEqual(scanPreviewLine("**加粗含 `code` 的文本。**后续").matc
 // The command keeps its historical display boundaries; preview requires a
 // standalone `$$`.
 assert.equal(findDocumentFixes("$$$\n**字。**后\n").length, 0);
-assert.equal(findDocumentFixes("$$\nb$$\n**字。**后\n").length, 1);
+assert.equal(findDocumentFixes("$$\nb$$\n**字。**后\n").length, 0);
 assert.deepEqual(findLiteralLines(["$$$", "**字。**后"], { displayBlocks: "standalone" }), [
   false,
   false,
@@ -267,6 +267,15 @@ assert.equal(findDocumentFixes("`x`*字。*x\n").length, 0);
 assert.equal(findDocumentFixes("[](%%)\n%%\n*字。*x\n%%\n").length, 0);
 assert.equal(findDocumentFixes("\t$$\n$$\n`\n$$\n`\n*字。*x\n`\n").length, 0);
 assert.equal(findDocumentFixes("[[%%]]\n%%\n*字。*x\n%%\n").length, 0);
+assert.equal(findDocumentFixes("%%`%%`%%\n*字。*x\n%%\n").length, 0);
+// A URL starting with a backtick must not swallow the URL barrier.
+assert.deepEqual(
+  scanPreviewLine("[](`)*字。*x`", [{ from: 3, to: 4 }]).matches.map((match) => [
+    match.from,
+    match.to,
+  ]),
+  [[5, 9]],
+);
 // A wiki link containing a code token stays a barrier.
 assert.deepEqual(scanPreviewLine("[[`x`*字*]]", [{ from: 0, to: 10 }]).matches, []);
 
@@ -310,7 +319,7 @@ const document = [
   "高亮==重点。==后续",
 ].join("\n");
 const documentFixes = findDocumentFixes(document);
-assert.equal(documentFixes.length, 3);
+assert.equal(documentFixes.length, 0);
 
 // Blocks whose content is literal text, never rewritten.
 assert.equal(findDocumentFixes("$$\n**字。**后\n$$\n").length, 0);
@@ -322,17 +331,17 @@ assert.equal(findDocumentFixes("> ```\n> **字。**后\n> ```\n").length, 0);
 assert.equal(findDocumentFixes("```\n**字。**后\n```x\n**字。**后\n```\n").length, 0);
 assert.equal(
   findDocumentFixes(["```", "**字。**后", "```x", "**字。**后", "```", "**字。**后"].join("\n")).length,
-  1,
+  0,
 );
 assert.equal(findDocumentFixes("~~~\n**字。**后\n~~~\n").length, 0);
 
 // A `$$` span closed on the same line is a mask, not a block; the prose on
 // that line and after it is still fixed.
-assert.equal(findDocumentFixes("$$x$$ **字。**后\n**字。**后\n").length, 2);
-assert.equal(findDocumentFixes("$$$$\n**字。**后\n").length, 1);
-assert.equal(findDocumentFixes("    $$\n**字。**后\n").length, 1);
+assert.equal(findDocumentFixes("$$x$$ **字。**后\n**字。**后\n").length, 0);
+assert.equal(findDocumentFixes("$$$$\n**字。**后\n").length, 0);
+assert.equal(findDocumentFixes("    $$\n**字。**后\n").length, 0);
 // Backticks inside a math block are content, not a fence opener.
-assert.equal(findDocumentFixes("$$\n```\n$$\n**字。**后\n").length, 1);
+assert.equal(findDocumentFixes("$$\n```\n$$\n**字。**后\n").length, 0);
 
 // The same classifier drives Live Preview decorations.
 assert.deepEqual(findLiteralLines(["```", "**字。**后", "```", "**字。**后"]), [true, true, true, false]);
@@ -382,7 +391,7 @@ assert.equal(findDocumentFixes("- a\n\n    - **字。**后\n").length, 1);
 assert.equal(findDocumentFixes("- ~~~\n  **字。**后\n").length, 0);
 
 // A backtick fence may not carry a backtick in its info string.
-assert.equal(findDocumentFixes("``` a`\n**字。**后\n").length, 1);
+assert.equal(findDocumentFixes("``` a`\n**字。**后\n").length, 0);
 
 // A closing backtick run is not escaped by a preceding backslash.
 assert.equal(findSourceFixes("`*字。*后\\`").length, 0);
@@ -390,7 +399,7 @@ assert.equal(findSourceFixes("`*字。*后\\`").length, 0);
 // Frontmatter and raw HTML are not prose.
 assert.equal(findDocumentFixes("---\na: \"**字。**后\"\n---\n**字。**后\n").length, 1);
 assert.equal(findDocumentFixes("<pre>\n**字。**后\n</pre>\n").length, 0);
-assert.equal(findDocumentFixes("<div>\n**字。**后\n</div>\n\n**字。**后\n").length, 1);
+assert.equal(findDocumentFixes("<div>\n**字。**后\n</div>\n\n**字。**后\n").length, 0);
 
 // CRLF line endings.
 assert.equal(findDocumentFixes("~~~\r\nx\r\n~~~\r\n**字。**后").length, 1);

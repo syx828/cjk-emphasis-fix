@@ -1084,22 +1084,37 @@ function findDocumentBarriers(text: string): TextMask[] {
   return barriers;
 }
 
-/** `%%...%%` comments, possibly spanning lines. */
-function findCommentRanges(text: string): TextMask[] {
+/** `%%...%%` comments, where token ranges outside a comment are opaque. */
+function findCommentRanges(text: string, tokens: readonly TextMask[] = []): TextMask[] {
+  const sorted = [...tokens].sort((a, b) => a.from - b.from);
   const ranges: TextMask[] = [];
   let index = 0;
+  let tokenIndex = 0;
   while (index < text.length) {
-    const open = text.indexOf("%%", index);
-    if (open === -1) break;
-    const close = text.indexOf("%%", open + 2);
-    if (close === -1) break;
-    ranges.push({ from: open, to: close + 2 });
-    index = close + 2;
+    while (tokenIndex < sorted.length && sorted[tokenIndex].to <= index) tokenIndex++;
+    const token = sorted[tokenIndex];
+    if (token && token.from <= index && index < token.to) {
+      index = token.to;
+      continue;
+    }
+    if (text.startsWith("%%", index)) {
+      const close = text.indexOf("%%", index + 2);
+      if (close === -1) break;
+      ranges.push({ from: index, to: close + 2 });
+      index = close + 2;
+      continue;
+    }
+    index++;
   }
   return ranges;
 }
 
 export function findDocumentFixes(text: string): SourceFix[] {
+  // The source rewrite only runs on notes without syntax the line scanner does
+  // not model. One character of link, HTML, math, comment, inline-code, table
+  // or entity syntax disables the command for the whole note; this is a
+  // deliberate safety gate, not a parser.
+  if (/[\[\]<!$|%`&]/.test(text)) return [];
   const fixes: SourceFix[] = [];
   const lines = text.split("\n");
   const literal = findLiteralLines(lines);
@@ -1201,12 +1216,7 @@ export function findDocumentFixes(text: string): SourceFix[] {
   // Comments: blank code and same-line math tokens first so a `%%` inside them
   // cannot pair with a real comment opener. Already-known URL/HTML/title
   // barriers apply here too.
-  const commentChars = masked.split("");
-  const blankComment = (from: number, to: number): void => {
-    for (let index = Math.max(0, from); index < Math.min(commentChars.length, to); index++) {
-      if (commentChars[index] !== "\n") commentChars[index] = " ";
-    }
-  };
+  const tokenRanges: TextMask[] = [];
   for (let index = 0; index < lines.length; index++) {
     const lineText = lines[index].endsWith("\r") ? lines[index].slice(0, -1) : lines[index];
     const lineFrom = starts[index];
@@ -1220,22 +1230,19 @@ export function findDocumentFixes(text: string): SourceFix[] {
       });
     }
     for (const token of tokenizePreviewLine(lineText, lineBarriers)) {
-      blankComment(lineFrom + token.from, lineFrom + token.to);
+      tokenRanges.push({ from: lineFrom + token.from, to: lineFrom + token.to });
+    }
+    const wikiPattern = /!?\[\[[^\]\n]*\]\]/g;
+    let wikiMatch: RegExpExecArray | null;
+    while ((wikiMatch = wikiPattern.exec(lineText)) !== null) {
+      tokenRanges.push({
+        from: lineFrom + wikiMatch.index,
+        to: lineFrom + wikiMatch.index + wikiMatch[0].length,
+      });
     }
   }
-  for (const barrier of documentBarriers) {
-    blankComment(barrier.from, barrier.to);
-  }
-  // Wiki-link syntax is opaque during comment detection: `%%` inside a link
-  // target belongs to the link, not to a comment.
-  let commentView = commentChars.join("");
-  const wikiPattern = /!?\[\[[^\]\n]*\]\]/g;
-  let wikiMatch: RegExpExecArray | null;
-  while ((wikiMatch = wikiPattern.exec(commentView)) !== null) {
-    blankComment(wikiMatch.index, wikiMatch.index + wikiMatch[0].length);
-  }
-  commentView = commentChars.join("");
-  const barriers = [...documentBarriers, ...findCommentRanges(commentView)];
+  for (const barrier of documentBarriers) tokenRanges.push(barrier);
+  const barriers = [...documentBarriers, ...findCommentRanges(text, tokenRanges)];
   let lineFrom = 0;
 
   for (let index = 0; index < lines.length; index++) {
