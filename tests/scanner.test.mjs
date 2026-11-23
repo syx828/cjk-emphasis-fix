@@ -162,6 +162,33 @@ assert.deepEqual(
   [true, true, true, true, true, false],
 );
 
+// A fence belongs to the container it opened in.
+assert.deepEqual(findLiteralLines(["> ~~~", "**字。**后"]), [true, false]);
+assert.equal(findDocumentFixes("> ~~~\n**字。**后\n").length, 1);
+assert.equal(findDocumentFixes("> ~~~\n~~~\n**字。**后\n").length, 0);
+assert.equal(findDocumentFixes("~~~\n> ~~~\n**字。**后\n").length, 0);
+assert.deepEqual(findLiteralLines(["> > ~~~", "> **字。**后"]), [true, false]);
+assert.equal(findDocumentFixes("> > ~~~\n> **字。**后\n").length, 1);
+
+// List items: an indented continuation is prose, a fence inside an item is code.
+assert.equal(findDocumentFixes("- a\n\n    **字。**后\n").length, 1);
+assert.equal(findDocumentFixes("- a\n\n    - **字。**后\n").length, 1);
+assert.equal(findDocumentFixes("- ~~~\n  **字。**后\n").length, 0);
+
+// A backtick fence may not carry a backtick in its info string.
+assert.equal(findDocumentFixes("``` a`\n**字。**后\n").length, 1);
+
+// A closing backtick run is not escaped by a preceding backslash.
+assert.equal(findSourceFixes("`*字。*后\\`").length, 0);
+
+// Frontmatter and raw HTML are not prose.
+assert.equal(findDocumentFixes("---\na: \"**字。**后\"\n---\n**字。**后\n").length, 1);
+assert.equal(findDocumentFixes("<pre>\n**字。**后\n</pre>\n").length, 0);
+assert.equal(findDocumentFixes("<div>\n**字。**后\n</div>\n\n**字。**后\n").length, 1);
+
+// CRLF line endings.
+assert.equal(findDocumentFixes("~~~\r\nx\r\n~~~\r\n**字。**后").length, 1);
+
 // Parser runs that overflow a marked span, including split runs.
 assert.deepEqual(findExcessParserRanges([102], [{ from: 23, to: 111 }], 200), [
   { from: 102, to: 111 },

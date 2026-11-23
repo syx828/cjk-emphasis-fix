@@ -69,8 +69,8 @@ function classesFor(kind: EmphasisMatch["kind"]): string[] {
 /** Literal-line map for a whole document, computed once per edit. */
 function literalLinesFor(doc: Text): boolean[] {
   const lines: string[] = [];
-  for (let number = 1; number <= doc.lines; number++) {
-    lines.push(doc.line(number).text);
+  for (const line of doc.iterLines(1, doc.lines + 1)) {
+    lines.push(line);
   }
   return findLiteralLines(lines);
 }
