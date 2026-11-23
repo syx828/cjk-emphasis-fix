@@ -153,7 +153,19 @@ function isValidCandidate(
 ): EmphasisMatch | null {
   if (contentFrom >= contentTo) return null;
   const content = text.slice(contentFrom, contentTo);
+  if (contentFrom >= contentTo) return null;
   if (/^\s/u.test(content) || /\s$/u.test(content)) return null;
+
+  // A dollar that touches the delimiter would otherwise pair with a span in
+  // math, as in `$*字$*文。*后`; keep the emphasis on one side of it.
+  const first = text[contentFrom];
+  const last = text[contentTo - 1];
+  const bareDollar = (position: number, character: string): boolean =>
+    character === "$" &&
+    text[position - 1] !== "$" &&
+    text[position + 1] !== "$" &&
+    !isEscaped(text, position);
+  if (bareDollar(contentFrom, first) || bareDollar(contentTo - 1, last)) return null;
 
   const cjkRelated = hasCJKRelatedContent(content);
   if (!cjkRelated) return null;
@@ -325,7 +337,16 @@ export function scanLine(
   text: string,
   extraMasks: readonly TextMask[] = [],
 ): { matches: EmphasisMatch[]; masks: TextMask[] } {
-  const masks = [...findMasks(text), ...extraMasks].sort((a, b) => a.from - b.from);
+  const heuristic = findMasks(text);
+  const masks =
+    extraMasks.length === 0
+      ? heuristic
+      : [
+          ...heuristic.filter(
+            (mask) => !extraMasks.some((extra) => overlaps(mask, extra)),
+          ),
+          ...extraMasks,
+        ].sort((a, b) => a.from - b.from);
   const scannable = maskDelimiters(text, masks);
   const consumed: TextMask[] = [];
   const matches: EmphasisMatch[] = [];

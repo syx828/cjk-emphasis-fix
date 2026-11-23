@@ -145,6 +145,20 @@ assert.deepEqual(
   scanLine("**甲** *乙。*续", [{ from: 0, to: 5 }]).matches.map((match) => match.kind),
   ["em"],
 );
+// A caller mask overrides the heuristic display-math mask instead of being
+// swallowed by it.
+assert.deepEqual(
+  scanLine("[]($$)*字。*后$$", [{ from: 3, to: 5 }]).matches.map((match) => [
+    match.from,
+    match.to,
+    match.kind,
+  ]),
+  [[6, 10, "em"]],
+);
+// Emphasis does not swallow a bare dollar at its boundary.
+assert.deepEqual(kinds("$*字$*文。*后"), ["em"]);
+assert.equal(scanLine("$*字$*文。*后").matches[0].from, 4);
+assert.deepEqual(kinds("**价格 $5 元。**后"), ["strong"]);
 
 // The command treats multi-line code lines as literal.
 assert.deepEqual(findLiteralLines(["`a", "b` **字。**后"]), [true, true]);
