@@ -320,6 +320,8 @@ const CLOSING_TO_OPENING: Record<string, string> = {
   "〉": "〈",
   "〕": "〔",
   "〗": "〖",
+  "»": "«",
+  "〙": "〘",
   ")": "(",
   "]": "[",
   "}": "{",
@@ -360,6 +362,13 @@ function canCloseEmphasis(text: string, start: number, length: number): boolean 
 }
 
 export function findSourceFixes(text: string): SourceFix[] {
+  // The rewrite only touches plain prose. Links, embeds, HTML, math and tables
+  // all carry syntax a punctuation move can break (a link destination, an
+  // attribute value, a comment), so the whole line is skipped. Inline code and
+  // `$$` spans are masked first, so their content does not trip the check.
+  const gate = maskDelimiters(text, findMasks(text));
+  if (/[\][<!$|]/.test(gate)) return [];
+
   const { matches, masks } = scanLine(text);
   const fixes: SourceFix[] = [];
   for (const match of matches) {
@@ -498,13 +507,13 @@ function markLines(
   }
 }
 
-/** YAML frontmatter: `---` on line one, a closing delimiter, no blank line. */
+/** YAML frontmatter: `---` on line one, a closing delimiter without a limit. */
 function findFrontmatterEnd(lines: readonly string[]): number {
   if (lines.length === 0) return -1;
   if (lines[0].replace(/\r$/, "") !== "---") return -1;
-  for (let index = 1; index < lines.length; index++) {
-    const line = lines[index].replace(/\r$/, "");
-    if (line.trim() === "") return -1;
+  const limit = Math.min(lines.length, 200);
+  for (let index = 1; index < limit; index++) {
+    const line = lines[index].replace(/\r$/, "").trim();
     if (line === "---" || line === "...") return index;
   }
   return -1;
@@ -523,10 +532,15 @@ function findFrontmatterEnd(lines: readonly string[]): number {
  * so they are layered on top.
  */
 function stripMathMarkers(line: string): string {
-  return line
-    .replace(/^(?:>\s*)+/, "")
-    .replace(/^(?:[-+*]|\d{1,9}[.)])\s+/, "")
-    .trim();
+  let value = line.trim();
+  for (;;) {
+    const next = value
+      .replace(/^(?:>\s*)+/, "")
+      .replace(/^(?:[-+*]|\d{1,9}[.)])\s+/, "")
+      .trim();
+    if (next === value) return value;
+    value = next;
+  }
 }
 
 export function findLiteralLines(lines: readonly string[]): boolean[] {
@@ -596,17 +610,43 @@ export function findLiteralLines(lines: readonly string[]): boolean[] {
 
   // Parse again with frontmatter, math and multi-line code blanked out. Without
   // this, a fence inside those regions changes how the parser reads the rest of
-  // the document and hides real prose behind a phantom block.
-  const blanked = stripped
-    .map((line, index) => (literal[index] ? " ".repeat(line.length) : line))
-    .join("\n");
-  const reparsed = parse(blanked);
+  // the document and hides real prose behind a phantom block. Only the literal
+  // ranges are blanked, never whole lines: blanking a line that merely contains
+  // a code span would also erase a list marker or a quote marker and change how
+  // the second parse reads the fences around it.
+  const characters = stripped.join("\n").split("");
+  const blankRange = (from: number, to: number) => {
+    for (let index = Math.max(0, from); index < Math.min(characters.length, to); index++) {
+      if (characters[index] !== "\n") characters[index] = " ";
+    }
+  };
+  for (let index = 0; index <= frontmatterEnd && index < stripped.length; index++) {
+    blankRange(starts[index], starts[index] + stripped[index].length);
+  }
+  for (let index = 0; index < mathLines.length; index++) {
+    if (mathLines[index]) {
+      blankRange(starts[index], starts[index] + stripped[index].length);
+    }
+  }
+  for (const node of parsed.inlineNodes) {
+    const first = lineIndexAt(starts, node.from);
+    const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
+    if (first !== last) blankRange(node.from, node.to);
+  }
+
+  const reparsed = parse(characters.join(""));
   const blockLiteral = new Array<boolean>(lines.length).fill(false);
   for (const node of reparsed.blockNodes) {
     markLines(blockLiteral, starts, node.from, node.to);
   }
   for (let index = 0; index < literal.length; index++) {
     if (blockLiteral[index]) literal[index] = true;
+  }
+  for (const node of reparsed.inlineNodes) {
+    const first = lineIndexAt(starts, node.from);
+    const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
+    if (first === last) continue;
+    for (let index = first; index <= last; index++) literal[index] = true;
   }
 
   return literal;

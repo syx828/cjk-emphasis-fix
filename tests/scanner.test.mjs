@@ -88,6 +88,23 @@ const codeFix = findSourceFixes("**加粗含 `code` 的文本。**后续");
 assert.equal(codeFix.length, 1);
 assert.equal(codeFix[0].replacement, "**加粗含 `code` 的文本**。");
 
+// The rewrite only touches plain prose. Links, embeds, HTML, math and tables
+// carry syntax a punctuation move can break, so the whole line is skipped.
+assert.equal(findSourceFixes("[](*字。*后)").length, 0);
+assert.equal(findSourceFixes("*字<br/>*后").length, 0);
+assert.equal(findSourceFixes("<!--*字。*后-->").length, 0);
+assert.equal(findSourceFixes("a <i x=\"*字。*后\">").length, 0);
+assert.equal(findSourceFixes("![[==字。==后]]").length, 0);
+assert.equal(findSourceFixes("$*字。*后$").length, 0);
+assert.equal(findSourceFixes("| *字。*后 |").length, 0);
+assert.equal(findSourceFixes("*«字»*后").length, 0);
+assert.equal(findSourceFixes("**甲** [](*乙。*续)").length, 0);
+
+// A list item whose first line holds a multi-line code span must keep its
+// marker when the document is re-parsed.
+assert.equal(findDocumentFixes("- `\n  `\n  ~~~\n~~~\n*字。*后\n").length, 0);
+assert.equal(findDocumentFixes("$$\n~~~\n$$\n`\n*字。*后`\n").length, 0);
+
 // Escaped markers are literal text, not delimiters.
 assert.deepEqual(kinds("a*\\*字。*后"), []);
 assert.equal(findSourceFixes("a*\\*字。*后").length, 0);
@@ -177,6 +194,7 @@ assert.deepEqual(findLiteralLines("- $$\n  **中。**续\n  $$\n\n**文。**续\
 assert.deepEqual(findLiteralLines("---\nx: |\n  ```\n---\n**中。**续\n".split("\n")), [
   true, true, true, true, false, false,
 ]);
+assert.equal(findDocumentFixes("---\na: \"**字。**后\"\n\n---\n**字。**后\n").length, 1);
 assert.deepEqual(findLiteralLines("$$\n```\n$$\n```mermaid\n**中。**续\n```\n".split("\n")), [
   true, true, true, true, true, true, false,
 ]);
