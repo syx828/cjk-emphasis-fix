@@ -159,6 +159,11 @@ assert.deepEqual(
   [{ from: 14, to: 17 }],
 );
 assert.deepEqual(findInlineMathMasks("\\$*字。*后\\$"), []);
+// A protected range cancels the pending opener instead of being crossed.
+assert.deepEqual(findInlineMathMasks("$x$", [{ from: 1, to: 2 }]), []);
+// The second dollar of a `$$` run is never a single-dollar closer or opener.
+assert.deepEqual(findInlineMathMasks("$a$$"), []);
+assert.deepEqual(findInlineMathMasks("$$$a$"), []);
 
 const highlightFix = findSourceFixes("前==重要！==后");
 assert.equal(highlightFix[0].replacement, "==重要==！");

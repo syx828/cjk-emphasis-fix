@@ -74,7 +74,14 @@ function classesFor(kind: EmphasisMatch["kind"]): string[] {
 }
 
 /** Syntax the decoration pass must not reach into. */
-const PROTECTED_NODES = new Set(["InlineCode", "HTMLTag", "Comment", "Entity", "URL"]);
+const PROTECTED_NODES = new Set([
+  "InlineCode",
+  "HTMLTag",
+  "Comment",
+  "Entity",
+  "URL",
+  "LinkTitle",
+]);
 
 function collectProtectedRanges(view: EditorView): TextMask[] {
   const ranges: TextMask[] = [];
@@ -154,12 +161,6 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
     let link: RegExpExecArray | null;
     while ((link = wikilink.exec(line.text)) !== null) {
       lineMasks.push({ from: link.index, to: link.index + link[0].length });
-    }
-    const linkDestination = /\]\(([^)\n]*)\)/g;
-    let destination: RegExpExecArray | null;
-    while ((destination = linkDestination.exec(line.text)) !== null) {
-      const start = destination.index + 2;
-      lineMasks.push({ from: start, to: start + destination[1].length });
     }
     for (const mask of findInlineMathMasks(line.text, lineMasks)) {
       lineMasks.push(mask);

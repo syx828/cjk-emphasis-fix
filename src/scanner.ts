@@ -618,6 +618,8 @@ export function findInlineMathMasks(
 ): TextMask[] {
   const isProtected = (position: number): boolean =>
     protectedRanges.some((range) => range.from <= position && position < range.to);
+  const overlapsProtected = (from: number, to: number): boolean =>
+    protectedRanges.some((range) => range.from < to && from < range.to);
   const isEscaped = (position: number): boolean => {
     let slashes = 0;
     let cursor = position - 1;
@@ -627,6 +629,10 @@ export function findInlineMathMasks(
     }
     return slashes % 2 === 1;
   };
+  // A dollar that touches another dollar belongs to a `$$` run and can never
+  // delimit single-dollar math.
+  const isSingleDollar = (position: number): boolean =>
+    text[position] === "$" && text[position - 1] !== "$" && text[position + 1] !== "$";
 
   const masks: TextMask[] = [];
   let index = 0;
@@ -635,15 +641,11 @@ export function findInlineMathMasks(
       index++;
       continue;
     }
-    if (isProtected(index)) {
-      index++;
+    if (!isSingleDollar(index)) {
+      while (index < text.length && text[index] === "$") index++;
       continue;
     }
-    if (text[index + 1] === "$") {
-      index += 2;
-      continue;
-    }
-    if (isEscaped(index)) {
+    if (isProtected(index) || isEscaped(index)) {
       index++;
       continue;
     }
@@ -654,7 +656,11 @@ export function findInlineMathMasks(
         close++;
         continue;
       }
-      if (text[close + 1] === "$" || isEscaped(close) || isProtected(close)) {
+      if (!isSingleDollar(close)) {
+        while (close < text.length && text[close] === "$") close++;
+        continue;
+      }
+      if (isEscaped(close)) {
         close++;
         continue;
       }
@@ -662,6 +668,10 @@ export function findInlineMathMasks(
       break;
     }
     if (matched === -1) break;
+    if (overlapsProtected(index, matched + 1)) {
+      index++;
+      continue;
+    }
     masks.push({ from: index, to: matched + 1 });
     index = matched + 1;
   }
