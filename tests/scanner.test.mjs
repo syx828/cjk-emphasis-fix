@@ -857,4 +857,98 @@ assert.deepEqual(barrierHeavyCodes, [{ from: 14000, to: 14007 }]);
 assert.equal(barrierHeavyLiteral.length, 2003);
 assert.ok(barrierHeavyLiteral.every((value) => value === false));
 
+// --- 0.4.9 round 2: shared boundary lines, wiki text inside code, and code
+// --- fences breaking pending inline state. ----------------------------------
+
+// 1) A line can close one multiline span and open the next. The accepted
+// prefix must not be re-tokenized as fresh prose: its dollar cannot pair with
+// the dollar after the second opener.
+const sharedBoundary = ["`", "$` `$", "*字*`"];
+const sharedCodes = [];
+const sharedLiteral = findLiteralLines(
+  sharedBoundary,
+  { displayBlocks: "standalone", multilineCode: false },
+  sharedCodes,
+);
+assert.deepEqual(sharedLiteral, [false, false, false]);
+assert.deepEqual(sharedCodes, [
+  { from: 0, to: 4 },
+  { from: 5, to: 12 },
+]);
+assert.deepEqual(previewMatches(sharedBoundary, sharedCodes), []);
+
+// The closer ends code; math after it stays opaque and only the later prose
+// emphasis is marked.
+const sharedCounterexample = ["`", "$`$*字*$ *文*"];
+const sharedCounterCodes = [];
+findLiteralLines(
+  sharedCounterexample,
+  { displayBlocks: "standalone", multilineCode: false },
+  sharedCounterCodes,
+);
+assert.deepEqual(sharedCounterCodes, [{ from: 0, to: 4 }]);
+assert.deepEqual(previewMatches(sharedCounterexample, sharedCounterCodes), [[10, 13]]);
+
+// 2) Wiki-looking text between a real opener and its closer is code content.
+// The earlier backtick wins only because an exact-width closer is confirmed,
+// so the link-looking text does not split the line into gaps.
+const wikiInsideCode = ["`[[a]]", "$`$*字*$"];
+const wikiInsideCodes = [];
+const wikiInsideLiteral = findLiteralLines(
+  wikiInsideCode,
+  { displayBlocks: "standalone", multilineCode: false },
+  wikiInsideCodes,
+);
+assert.deepEqual(wikiInsideLiteral, [false, false]);
+assert.deepEqual(wikiInsideCodes, [{ from: 0, to: 9 }]);
+assert.deepEqual(previewMatches(wikiInsideCode, wikiInsideCodes), []);
+// The decision is shared: without a confirmed closer the candidate is a link;
+// with one, the candidate is code content.
+assert.deepEqual(findWikiBarriers("`[[a]]"), [{ from: 1, to: 6 }]);
+assert.deepEqual(
+  findWikiBarriers("`[[a]]", [], { hasCodeCloser: () => true }),
+  [],
+);
+
+// A wiki link that opens first owns its backtick; it never seeds code.
+const wikiAliasOwned = ["[[a|`]]", "*字* `x`"];
+const wikiAliasOwnedCodes = [];
+const wikiAliasOwnedLiteral = findLiteralLines(
+  wikiAliasOwned,
+  { displayBlocks: "standalone", multilineCode: false },
+  wikiAliasOwnedCodes,
+);
+assert.deepEqual(wikiAliasOwnedLiteral, [false, false]);
+assert.deepEqual(wikiAliasOwnedCodes, []);
+assert.deepEqual(previewMatches(wikiAliasOwned, wikiAliasOwnedCodes), [[8, 11]]);
+assert.deepEqual(
+  findWikiBarriers("[[a|`]]", [], { hasCodeCloser: () => true }),
+  [{ from: 0, to: 7 }],
+);
+
+// 3) A backtick inside a fenced block is literal: it neither starts pending
+// inline code nor carries one across the block boundary.
+const fencedBacktick = ["~~~", "`", "~~~", "$`$`", "*字*`"];
+const fencedCodes = [];
+const fencedLiteral = findLiteralLines(
+  fencedBacktick,
+  { displayBlocks: "standalone", multilineCode: false },
+  fencedCodes,
+);
+assert.deepEqual(fencedLiteral, [true, true, true, false, false]);
+assert.deepEqual(fencedCodes, [{ from: 13, to: 19 }]);
+assert.deepEqual(previewMatches(fencedBacktick, fencedCodes), []);
+
+// Pending state still crosses ordinary paragraph newlines.
+const paragraphPending = ["`", "*字*", "`"];
+const paragraphCodes = [];
+const paragraphLiteral = findLiteralLines(
+  paragraphPending,
+  { displayBlocks: "standalone", multilineCode: false },
+  paragraphCodes,
+);
+assert.deepEqual(paragraphLiteral, [false, false, false]);
+assert.deepEqual(paragraphCodes, [{ from: 0, to: 7 }]);
+assert.deepEqual(previewMatches(paragraphPending, paragraphCodes), []);
+
 console.log("scanner tests: ok");

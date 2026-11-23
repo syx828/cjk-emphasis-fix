@@ -507,6 +507,30 @@ function tokenizePreviewLineDetailed(
   return { tokens, unclosedCode };
 }
 
+/** Clamp barriers into the half-open window [from, to), relative to `from`. */
+function clipBarriers(
+  barriers: readonly TextMask[],
+  from: number,
+  to: number,
+): TextMask[] {
+  const clipped: TextMask[] = [];
+  for (const barrier of barriers) {
+    const start = Math.max(barrier.from, from);
+    const end = Math.min(barrier.to, to);
+    if (end > start) clipped.push({ from: start - from, to: end - from });
+  }
+  return clipped;
+}
+
+export interface WikiBarrierContext {
+  /**
+   * True when the backtick run at `column` has a confirmed exact-width closer
+   * later in the same Markdown block. A candidate after such a run is code
+   * content, not a link.
+   */
+  hasCodeCloser: (column: number, width: number) => boolean;
+}
+
 /**
  * Wiki links that may act as barriers on one line.
  *
@@ -516,10 +540,14 @@ function tokenizePreviewLineDetailed(
  * barrier, is that token's content. Tokens that open inside the match and run
  * past its closer were invented by the link's own delimiters and are ignored.
  * Interior tokens are allowed, so a link may contain inline code.
+ *
+ * With a context, an earlier backtick run that is confirmed to close later in
+ * the block owns the candidate, so the apparent link is code content.
  */
 export function findWikiBarriers(
   text: string,
   barriers: readonly TextMask[] = [],
+  context?: WikiBarrierContext,
 ): TextMask[] {
   const pattern = /!?\[\[[^\]\n]+\]\]/g;
   const candidates: TextMask[] = [];
@@ -535,6 +563,7 @@ export function findWikiBarriers(
     merged.some((barrier) => barrier.from <= index && index < barrier.to);
 
   const kept: TextMask[] = [];
+  const confirmed: TextMask[] = [];
   for (const candidate of candidates) {
     // `![[x]]` starts at the bang; the bracket itself is one character later.
     const opening = text[candidate.from] === "!" ? candidate.from + 1 : candidate.from;
@@ -547,7 +576,24 @@ export function findWikiBarriers(
       relevant.some((token) => token.from <= index && index < token.to);
     if (insideToken(opening) || insideToken(closing)) continue;
     if (insideBarrier(opening) || insideBarrier(closing)) continue;
+    if (context) {
+      // Earlier candidates are link text, not code: their own backticks must
+      // not be mistaken for the opener that owns this candidate.
+      const prefixBarriers = clipBarriers(
+        [...barriers, ...confirmed],
+        0,
+        candidate.from,
+      );
+      const prefix = tokenizePreviewLineDetailed(text.slice(0, candidate.from), prefixBarriers);
+      if (
+        prefix.unclosedCode &&
+        context.hasCodeCloser(prefix.unclosedCode.from, prefix.unclosedCode.width)
+      ) {
+        continue;
+      }
+    }
     kept.push(candidate);
+    confirmed.push(candidate);
   }
   return kept;
 }
@@ -1079,20 +1125,6 @@ export function findLiteralLines(
     return index;
   };
 
-  const clippedBarriers = (
-    barriers: readonly TextMask[],
-    from: number,
-    to: number,
-  ): TextMask[] => {
-    const clipped: TextMask[] = [];
-    for (const barrier of barriers) {
-      const start = Math.max(barrier.from, from);
-      const end = Math.min(barrier.to, to);
-      if (end > start) clipped.push({ from: start - from, to: end - from });
-    }
-    return clipped;
-  };
-
   const closingCodeRunEnd = (text: string, from: number, width: number): number => {
     let cursor = from;
     while (cursor < text.length) {
@@ -1111,6 +1143,49 @@ export function findLiteralLines(
   };
 
   /**
+   * Whether a backtick run closes later in the same Markdown block. A block
+   * boundary (fence, indented/HTML/comment block) or a blank line ends the
+   * search, so an opener cannot borrow a closer from the next paragraph.
+   */
+  const createCodeCloser = (
+    textLines: readonly string[],
+    literalLines: readonly boolean[],
+  ): ((lineIndex: number, column: number, width: number) => boolean) => {
+    return (lineIndex, column, width) => {
+      let index = lineIndex;
+      let from = column + width;
+      while (index < textLines.length) {
+        if (literalLines[index]) return false;
+        if (index > lineIndex && textLines[index].length === 0) return false;
+        const lineText = textLines[index];
+        let cursor = from;
+        while (cursor < lineText.length) {
+          const runStart = lineText.indexOf("`", cursor);
+          if (runStart === -1) break;
+          let runEnd = runStart;
+          while (runEnd < lineText.length && lineText[runEnd] === "`") runEnd++;
+          let backslashes = 0;
+          for (let at = runStart - 1; at >= 0 && lineText[at] === "\\"; at--) {
+            backslashes++;
+          }
+          if (runEnd - runStart === width && backslashes % 2 === 0) return true;
+          cursor = runEnd;
+        }
+        index++;
+        from = 0;
+      }
+      return false;
+    };
+  };
+
+  /** Confirmed fenced/indented/HTML/comment block lines for one parse. */
+  const blockLinesFor = (nodes: readonly TextMask[], lineCount: number): boolean[] => {
+    const lines = new Array<boolean>(lineCount).fill(false);
+    for (const node of nodes) markLines(lines, starts, node.from, node.to);
+    return lines;
+  };
+
+  /**
    * Offset-preserving copy of the input in which characters owned by confirmed
    * math tokens, wiki barriers and frontmatter are spaces. Lezer must never see
    * those delimiters: a backtick inside inline math or inside a wiki target, or
@@ -1118,11 +1193,14 @@ export function findLiteralLines(
    *
    * A backtick run that stays open continues on the next line. Until its
    * exact-width closer is found, the line is code content: masking math there
-   * would blank the closer and lose the span.
+   * would blank the closer and lose the span. Confirmed literal blocks break
+   * that chain: a fence can neither seed a pending opener nor carry one across.
    */
   const maskMathAndFrontmatter = (
     textLines: readonly string[],
     barrierIndex: readonly TextMask[][],
+    literalLines: readonly boolean[],
+    closerFor: (lineIndex: number, column: number, width: number) => boolean,
   ): string => {
     // A non-breaking space keeps the masked line a paragraph: an ASCII space
     // run at the start of a line would turn it into an indented code block and
@@ -1134,6 +1212,11 @@ export function findLiteralLines(
       const lineText = textLines[index];
       if (index <= frontmatterEnd) {
         maskedLines.push(" ".repeat(lineText.length));
+        pendingWidth = 0;
+        continue;
+      }
+      if (literalLines[index]) {
+        maskedLines.push(lineText);
         pendingWidth = 0;
         continue;
       }
@@ -1156,14 +1239,17 @@ export function findLiteralLines(
         }
       }
       const segmentText = lineText.slice(segmentStart);
-      const baseBarriers = clippedBarriers(
+      const baseBarriers = clipBarriers(
         barrierIndex[index] ?? [],
         segmentStart,
         lineText.length,
       );
       // A dollar inside a wiki target must not pair with one outside it, and a
-      // backtick inside one is link text, not a code opener.
-      const wikiBarriers = findWikiBarriers(segmentText, baseBarriers);
+      // backtick inside one is link text, not a code opener. An earlier opener
+      // with a confirmed closer owns the apparent link, though.
+      const wikiBarriers = findWikiBarriers(segmentText, baseBarriers, {
+        hasCodeCloser: (column, width) => closerFor(index, segmentStart + column, width),
+      });
       const scan = tokenizePreviewLineDetailed(
         segmentText,
         [...baseBarriers, ...wikiBarriers],
@@ -1200,27 +1286,32 @@ export function findLiteralLines(
     textLines: readonly string[],
   ): {
     blockNodes: TextMask[];
+    blockLines: boolean[];
     inlineNodes: TextMask[];
     barrierIndex: TextMask[][];
+    closerFor: (lineIndex: number, column: number, width: number) => boolean;
   } => {
     const normal = parse(text);
+    const blockLines = blockLinesFor(normal.blockNodes, textLines.length);
     const barrierIndex = createBarrierIndex(
       normal.barrierNodes,
       textLines.map((line) => line.length),
     );
-    const inline = parse(maskMathAndFrontmatter(textLines, barrierIndex));
+    const closerFor = createCodeCloser(textLines, blockLines);
+    const inline = parse(
+      maskMathAndFrontmatter(textLines, barrierIndex, blockLines, closerFor),
+    );
     return {
       blockNodes: normal.blockNodes,
+      blockLines,
       inlineNodes: inline.inlineNodes,
       barrierIndex,
+      closerFor,
     };
   };
 
   const parsed = parseDocument(stripped.join("\n"), stripped);
-  const parserLiteral = new Array<boolean>(lines.length).fill(false);
-  for (const node of parsed.blockNodes) {
-    markLines(parserLiteral, starts, node.from, node.to);
-  }
+  const parserLiteral = parsed.blockLines;
 
   const literal = new Array<boolean>(lines.length).fill(false);
   for (let index = 0; index <= frontmatterEnd && index < literal.length; index++) {
@@ -1234,6 +1325,9 @@ export function findLiteralLines(
   const acceptedByFrom = new Map<number, TextMask>();
   const acceptedFroms: number[] = [];
   const multilineLines = new Array<boolean>(lines.length).fill(false);
+  // Line-relative end of accepted code on each line. Math ownership for a new
+  // opener starts after it, so an accepted prefix cannot pair delimiters.
+  const lineOwnedTo = new Array<number>(lines.length).fill(0);
   const baseSkip = parserLiteral.map(
     (value, index) => value || index <= frontmatterEnd,
   );
@@ -1261,6 +1355,9 @@ export function findLiteralLines(
       index++
     ) {
       multilineLines[index] = true;
+      const lineFrom = starts[index];
+      const ownedTo = Math.min(to, lineFrom + stripped[index].length) - lineFrom;
+      if (ownedTo > lineOwnedTo[index]) lineOwnedTo[index] = ownedTo;
     }
     return true;
   };
@@ -1322,28 +1419,54 @@ export function findLiteralLines(
     sourceLines: readonly string[],
     skipLines: readonly boolean[],
     barrierIndex: readonly TextMask[][],
+    closerFor: (lineIndex: number, column: number, width: number) => boolean,
   ): void => {
     const tracker = createMathTracker(sourceLines, skipLines);
-    const tokenCache = new Map<number, InlineToken[]>();
+    const tokenCache = new Map<string, InlineToken[]>();
     const wikiCache = new Map<number, TextMask[]>();
     const wikiForLine = (lineIndex: number): TextMask[] => {
       const cached = wikiCache.get(lineIndex);
       if (cached) return cached;
       const lineText = sourceLines[lineIndex] ?? "";
-      const wikiBarriers = findWikiBarriers(lineText, barrierIndex[lineIndex] ?? []);
+      const wikiBarriers = findWikiBarriers(lineText, barrierIndex[lineIndex] ?? [], {
+        hasCodeCloser: (column, width) => closerFor(lineIndex, column, width),
+      });
       wikiCache.set(lineIndex, wikiBarriers);
       return wikiBarriers;
     };
-    const tokensForLine = (lineIndex: number): InlineToken[] => {
-      const cached = tokenCache.get(lineIndex);
+    /**
+     * Math tokens that may own a new opener on `lineIndex`. Text already owned
+     * by accepted code is skipped: re-tokenizing it as fresh prose lets its
+     * dollars pair across a later opener.
+     */
+    const tokensForOpener = (lineIndex: number, column: number): InlineToken[] => {
+      const start = Math.min(lineOwnedTo[lineIndex], column);
+      const key = `${lineIndex}:${start}`;
+      const cached = tokenCache.get(key);
       if (cached) return cached;
       const lineText = sourceLines[lineIndex] ?? "";
-      const lineBarriers = barrierIndex[lineIndex] ?? [];
-      const tokens = tokenizePreviewLine(lineText, [
-        ...lineBarriers,
-        ...wikiForLine(lineIndex),
-      ]);
-      tokenCache.set(lineIndex, tokens);
+      let tokens: InlineToken[] = [];
+      if (start < lineText.length) {
+        const segmentText = lineText.slice(start);
+        const lineBarriers = clipBarriers(
+          barrierIndex[lineIndex] ?? [],
+          start,
+          lineText.length,
+        );
+        const wikiBarriers = findWikiBarriers(segmentText, lineBarriers, {
+          hasCodeCloser: (segmentColumn, width) =>
+            closerFor(lineIndex, start + segmentColumn, width),
+        });
+        tokens = tokenizePreviewLine(segmentText, [
+          ...lineBarriers,
+          ...wikiBarriers,
+        ]).map((token) => ({
+          from: token.from + start,
+          to: token.to + start,
+          kind: token.kind,
+        }));
+      }
+      tokenCache.set(key, tokens);
       return tokens;
     };
     // Source order is what gives one delimiter one owner.
@@ -1369,14 +1492,20 @@ export function findLiteralLines(
       if (startsInsideDisplayMath(sourceLines, tracker.owned, first, column, standaloneDisplay)) {
         continue;
       }
-      const insideMath = tokensForLine(first).some(
+      const insideMath = tokensForOpener(first, column).some(
         (token) => token.kind !== "code" && token.from <= column && column < token.to,
       );
       if (insideMath) continue;
       addAccepted(node.from, node.to);
     }
   };
-  collectInline(parsed.inlineNodes, stripped, baseSkip, parsed.barrierIndex);
+  collectInline(
+    parsed.inlineNodes,
+    stripped,
+    baseSkip,
+    parsed.barrierIndex,
+    parsed.closerFor,
+  );
   if (markMultiline) {
     for (let index = 0; index < literal.length; index++) {
       if (multilineLines[index]) literal[index] = true;
@@ -1481,7 +1610,13 @@ export function findLiteralLines(
         added = true;
       }
     }
-    collectInline(reparsed.inlineNodes, reparsedLines, reparseSkip, reparsed.barrierIndex);
+    collectInline(
+      reparsed.inlineNodes,
+      reparsedLines,
+      reparseSkip,
+      reparsed.barrierIndex,
+      reparsed.closerFor,
+    );
     if (markMultiline) {
       for (let index = 0; index < literal.length; index++) {
         if (multilineLines[index]) literal[index] = true;
