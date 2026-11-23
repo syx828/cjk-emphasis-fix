@@ -896,10 +896,11 @@ export function findLiteralLines(
   const standaloneDisplay = (options.displayBlocks ?? "legacy") === "standalone";
   const stripped = lines.map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
   // A leading BOM hides the first line from the Markdown parser (indented code
-  // and fences stop being recognised). Replace it with a space so offsets do
-  // not move.
+  // and fences stop being recognised). Strip it from the parse input; the line
+  // map below is built from the stripped text, so node offsets stay consistent
+  // while the original line text keeps its offsets for edits.
   if (stripped.length > 0 && stripped[0].charCodeAt(0) === 0xfeff) {
-    stripped[0] = ` ${stripped[0].slice(1)}`;
+    stripped[0] = stripped[0].slice(1);
   }
   const starts = lineStartsFor(stripped);
   const frontmatterEnd = findFrontmatterEnd(lines);

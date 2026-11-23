@@ -272,6 +272,12 @@ assert.equal(findDocumentFixes("\uFEFF    *字。*x\n").length, 0);
 assert.equal(findDocumentFixes("\uFEFF~~~\n*字。*x\n~~~\n").length, 0);
 assert.equal(findDocumentFixes("--- \na: \"*字。*x\"\n---\n").length, 0);
 assert.equal(findDocumentFixes("**字*。**x\n").length, 0);
+const bomFence = "\uFEFF   ~~~\n*字。*x\n   ~~~\n**字。**后\n";
+const bomFenceFixes = findDocumentFixes(bomFence);
+assert.equal(bomFenceFixes.length, 1);
+const bomApplied = bomFence.slice(0, bomFenceFixes[0].from) + bomFenceFixes[0].replacement + bomFence.slice(bomFenceFixes[0].to);
+assert.ok(bomApplied.includes("*字。*x"), "fence body must stay untouched");
+assert.ok(bomApplied.endsWith("**字**。后\n"), "prose after the fence must be repaired");
 // A URL starting with a backtick must not swallow the URL barrier.
 assert.deepEqual(
   scanPreviewLine("[](`)*字。*x`", [{ from: 3, to: 4 }]).matches.map((match) => [
