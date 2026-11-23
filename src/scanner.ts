@@ -197,7 +197,13 @@ function scanWithRegex(
     const contentFrom = from + pass.delimiterLength;
     const contentTo = to - pass.delimiterLength;
     const candidate = isValidCandidate(text, from, to, contentFrom, contentTo, pass);
-    if (!candidate) continue;
+    if (!candidate) {
+      // The closer the pattern picked may be a false one: a space before it, a
+      // run that cannot close, ... Resuming one character after the opener lets
+      // the next delimiter be tried instead of dropping the rest of the line.
+      expression.lastIndex = from + 1;
+      continue;
+    }
 
     matches.push(candidate);
     consumed.push(range);
@@ -221,10 +227,24 @@ export function scanLine(text: string): { matches: EmphasisMatch[]; masks: TextM
   };
 }
 
+/**
+ * Read the code point that ends at `index`. `codePointAt(index - 1)` alone
+ * returns the trailing surrogate of a surrogate pair.
+ */
+function codePointBefore(text: string, index: number): number | undefined {
+  if (index <= 0) return undefined;
+  const low = text.charCodeAt(index - 1);
+  if (low >= 0xdc00 && low <= 0xdfff && index >= 2) {
+    const high = text.charCodeAt(index - 2);
+    if (high >= 0xd800 && high <= 0xdbff) return text.codePointAt(index - 2);
+  }
+  return text.codePointAt(index - 1);
+}
+
 export function trailingPunctuationLength(text: string, from: number, to: number): number {
   let cursor = to;
   while (cursor > from) {
-    const code = text.codePointAt(cursor - 1);
+    const code = codePointBefore(text, cursor);
     if (code === undefined || !isPunctuation(code)) break;
     cursor -= code > 0xffff ? 2 : 1;
   }
@@ -235,6 +255,55 @@ export interface SourceFix {
   from: number;
   to: number;
   replacement: string;
+}
+
+/** Opening character for each closing character the punctuation walker may meet. */
+const CLOSING_TO_OPENING: Record<string, string> = {
+  "”": "“",
+  "’": "‘",
+  "）": "（",
+  "】": "【",
+  "」": "「",
+  "』": "『",
+  "》": "《",
+  "〉": "〈",
+  "〕": "〔",
+  "〗": "〖",
+  ")": "(",
+  "]": "[",
+  "}": "{",
+};
+
+function overlapsAnyMask(masks: TextMask[], from: number, to: number): boolean {
+  return masks.some((mask) => overlaps(mask, { from, to }));
+}
+
+/**
+ * A closing bracket or quote in the trailing run belongs to a pair opened
+ * inside the span, so moving only the closer would break that pair.
+ */
+function containsOpenedPair(content: string, trailing: string): boolean {
+  for (const character of trailing) {
+    const opening = CLOSING_TO_OPENING[character];
+    if (opening !== undefined && content.includes(opening)) return true;
+  }
+  return false;
+}
+
+function canOpenEmphasis(text: string, start: number, length: number): boolean {
+  const after = text.codePointAt(start + length);
+  if (after === undefined || isWhitespace(after)) return false;
+  if (!isPunctuation(after)) return true;
+  const before = codePointBefore(text, start);
+  return before === undefined || isWhitespace(before) || isPunctuation(before);
+}
+
+function canCloseEmphasis(text: string, start: number, length: number): boolean {
+  const before = codePointBefore(text, start);
+  if (before === undefined || isWhitespace(before)) return false;
+  if (!isPunctuation(before)) return true;
+  const after = text.codePointAt(start + length);
+  return after === undefined || isWhitespace(after) || isPunctuation(after);
 }
 
 export function findSourceFixes(text: string): SourceFix[] {
@@ -248,16 +317,39 @@ export function findSourceFixes(text: string): SourceFix[] {
     const punctLength = trailingPunctuationLength(text, match.contentFrom, match.contentTo);
     if (punctLength === 0) continue;
 
-    const contentWithoutPunctuation = text.slice(
-      match.contentFrom,
-      match.contentTo - punctLength,
-    );
+    const punctuationFrom = match.contentTo - punctLength;
+    const punctuation = text.slice(punctuationFrom, match.contentTo);
+    const contentWithoutPunctuation = text.slice(match.contentFrom, punctuationFrom);
+
+    // Punctuation that reaches into inline code is code content: moving it
+    // would rewrite what the code span contains.
+    if (overlapsAnyMask(masks, punctuationFrom, match.contentTo)) continue;
+    if (contentWithoutPunctuation.length === 0) continue;
+    if (containsOpenedPair(contentWithoutPunctuation, punctuation)) continue;
+
     const delimiter = text.slice(match.from, match.contentFrom);
-    const punctuation = text.slice(match.contentTo - punctLength, match.contentTo);
+    const replacement = `${delimiter}${contentWithoutPunctuation}${delimiter}${punctuation}`;
+
+    // Emphasis has to satisfy CommonMark's flanking rules on both sides after
+    // the rewrite. Moving punctuation out of a span that starts with an opening
+    // quote leaves the delimiter unable to open, so skip instead of producing
+    // text that still renders as literal markers.
+    if (match.marker === "*") {
+      const rewritten =
+        text.slice(0, match.from) + replacement + text.slice(match.to);
+      const closerStart = match.from + delimiter.length + contentWithoutPunctuation.length;
+      if (
+        !canOpenEmphasis(rewritten, match.from, delimiter.length) ||
+        !canCloseEmphasis(rewritten, closerStart, delimiter.length)
+      ) {
+        continue;
+      }
+    }
+
     fixes.push({
       from: match.from,
       to: match.to,
-      replacement: `${delimiter}${contentWithoutPunctuation}${delimiter}${punctuation}`,
+      replacement,
     });
   }
   return fixes;

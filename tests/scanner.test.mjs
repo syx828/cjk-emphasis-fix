@@ -46,6 +46,9 @@ assert.equal(
   inlineCodeLine.slice(inlineCodeMatches[0].contentFrom, inlineCodeMatches[0].contentTo),
   "“高级抽象（`std::linalg`/张量 DSL）+ 专用调度编译器（处理融合与不规则尺寸）+ 底层专家级微内核（MKL/BLIS/CUTLASS）”",
 );
+// The automatic rewrite skips it: the trailing `）”` closes a pair opened
+// inside the span, and the opener would still not satisfy CommonMark.
+assert.equal(findSourceFixes(inlineCodeLine).length, 0);
 
 // setext underline must not be read as highlight
 assert.deepEqual(kinds("==="), []);
@@ -54,6 +57,31 @@ assert.deepEqual(kinds("===="), []);
 const fixes = findSourceFixes("前面**文字。**继续");
 assert.equal(fixes.length, 1);
 assert.equal(fixes[0].replacement, "**文字**。");
+
+// A span whose content ends in inline code: the closing backtick is ASCII
+// punctuation, so the rewrite walker used to move it and corrupt the span.
+assert.equal(findSourceFixes("**`字`**后").length, 0);
+assert.equal(findSourceFixes("**字`x`。**后").length, 0);
+assert.equal(findSourceFixes("**` 字 `**后").length, 0);
+assert.equal(findSourceFixes("**𠀀`😀`。**𠀀").length, 0);
+
+// Closing characters that belong to a pair opened inside the span.
+assert.equal(findSourceFixes("**[字](u)**后").length, 0);
+assert.equal(findSourceFixes("中**“字”**后").length, 0);
+assert.equal(findSourceFixes("中**（字。**后").length, 0);
+
+// Punctuation that is safe to move even though the span contains code.
+const codeFix = findSourceFixes("**加粗含 `code` 的文本。**后续");
+assert.equal(codeFix.length, 1);
+assert.equal(codeFix[0].replacement, "**加粗含 `code` 的文本**。");
+
+// Nothing left to wrap after the move.
+assert.equal(findSourceFixes("**。**后").length, 0);
+
+// A closer that cannot close must not swallow the real span.
+assert.deepEqual(kinds("**`x` **字。**后"), ["strong"]);
+assert.equal(scanLine("**`x` **字。**后").matches[0].from, 6);
+assert.deepEqual(kinds("*`x` *字。*后"), ["em"]);
 
 const highlightFix = findSourceFixes("前==重要！==后");
 assert.equal(highlightFix[0].replacement, "==重要==！");
