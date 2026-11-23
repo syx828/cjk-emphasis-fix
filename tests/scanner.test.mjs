@@ -148,6 +148,37 @@ assert.deepEqual(
   [],
 );
 
+// Preview code ranges are pre-masked; delimiters inside them cannot pair.
+assert.deepEqual(
+  scanPreviewLine("b` *字。*后 `x`", [], [{ from: 1, to: 2 }]).matches.map((match) => [
+    match.from,
+    match.to,
+  ]),
+  [[3, 7]],
+);
+// Math opened first wins over a code-looking span inside it.
+assert.deepEqual(scanPreviewLine("$*字*`x`$").matches, []);
+// A `$$` owned by multi-line code must not open display math in preview.
+const codeMathLines = ["`a", "$$", "b`", "*字*"];
+const previewCodes = [];
+const previewLiteral = findLiteralLines(
+  codeMathLines,
+  { displayBlocks: "standalone", multilineCode: false },
+  previewCodes,
+);
+assert.deepEqual(previewLiteral, [false, false, false, false]);
+assert.ok(previewCodes.length > 0);
+// Code discovered only after blanking math must still reach preview.
+const mathThenCode = ["$$", "~~~", "$$", "`", "*字*", "`"];
+const lateCodes = [];
+const lateLiteral = findLiteralLines(
+  mathThenCode,
+  { displayBlocks: "standalone", multilineCode: false },
+  lateCodes,
+);
+assert.deepEqual(lateLiteral, [true, true, true, false, false, false]);
+assert.ok(lateCodes.length > 0);
+
 // Tokenizer: code and math ownership in source order.
 const tokenRanges = (text, barriers = []) =>
   tokenizePreviewLine(text, barriers).map((token) => [token.from, token.to, token.kind]);

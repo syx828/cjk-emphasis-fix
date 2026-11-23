@@ -542,9 +542,19 @@ export function scanLine(text: string): {
 export function scanPreviewLine(
   text: string,
   barriers: readonly TextMask[] = [],
+  codeRanges: readonly TextMask[] = [],
 ): { tokens: InlineToken[]; matches: EmphasisMatch[] } {
   const normalized = mergeRanges(barriers);
-  const tokens = tokenizePreviewLine(text, normalized);
+  const code = mergeRanges(codeRanges);
+  // Code ranges come from the literal-aware classifier, so they are masked
+  // before the line tokenizer runs; a closing backtick or `$` inside them can
+  // neither pair forward nor swallow the prose that follows.
+  const scannable = maskDelimiters(text, code);
+  const own = tokenizePreviewLine(scannable, normalized);
+  const tokens: InlineToken[] = [
+    ...own,
+    ...code.map((range) => ({ from: range.from, to: range.to, kind: "code" as const })),
+  ].sort((a, b) => a.from - b.from);
   return { tokens, matches: scanEmphasis(text, tokens, normalized) };
 }
 
@@ -893,20 +903,30 @@ export interface LiteralOptions {
    * requires a bare `$$` line on both ends and is used by Live Preview.
    */
   displayBlocks?: "legacy" | "standalone";
+  /**
+   * Treat lines touched by a multi-line inline code span as literal. The
+   * source-rewrite command needs this; Live Preview passes false and masks the
+   * code range per line instead.
+   */
+  multilineCode?: boolean;
 }
 
 export function findLiteralLines(
   lines: readonly string[],
   options: LiteralOptions = {},
+  codeRanges?: TextMask[],
 ): boolean[] {
   const standaloneDisplay = (options.displayBlocks ?? "legacy") === "standalone";
+  const markMultiline = options.multilineCode ?? true;
   const stripped = lines.map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
   // A leading BOM hides the first line from the Markdown parser (indented code
   // and fences stop being recognised). Strip it from the parse input; the line
   // map below is built from the stripped text, so node offsets stay consistent
   // while the original line text keeps its offsets for edits.
+  let bomOffset = 0;
   if (stripped.length > 0 && stripped[0].charCodeAt(0) === 0xfeff) {
     stripped[0] = stripped[0].slice(1);
+    bomOffset = 1;
   }
   const starts = lineStartsFor(stripped);
   const frontmatterEnd = findFrontmatterEnd(lines);
@@ -944,26 +964,41 @@ export function findLiteralLines(
     literal[index] = true;
   }
 
-  // Inline code that spans lines makes every line it touches literal. A span
-  // on one line is handled by the per-line masks. Spans that start inside an
-  // open display block are math content, not code.
-  const mathSkip = parserLiteral.map(
+  // Multi-line inline code: collect the ranges this classifier recognises.
+  // The command marks their lines literal; Live Preview masks only the code
+  // characters and scans the rest. Spans that start inside an open display
+  // block are math content, not code.
+  const collected: TextMask[] = [];
+  const multilineLines = new Array<boolean>(lines.length).fill(false);
+  const baseSkip = parserLiteral.map(
     (value, index) => value || index <= frontmatterEnd,
   );
-  const { open: mathOpen, ends: blockEnds } = mathRegions(
-    stripped,
-    starts,
-    standaloneDisplay,
-    mathSkip,
+  const collectInline = (nodes: readonly TextMask[], open: readonly boolean[]): void => {
+    multilineLines.fill(false);
+    collected.length = 0;
+    for (const node of nodes) {
+      const first = lineIndexAt(starts, node.from);
+      const column = node.from - starts[first];
+      if (startsInsideDisplayMath(stripped, open, first, column, standaloneDisplay)) continue;
+      const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
+      if (first === last) continue;
+      collected.push({ from: node.from, to: node.to });
+      for (let index = first; index <= last; index++) multilineLines[index] = true;
+    }
+  };
+  let regions = mathRegions(stripped, starts, standaloneDisplay, baseSkip);
+  collectInline(parsed.inlineNodes, regions.open);
+  const skipWithCode = baseSkip.map(
+    (value, index) => value || multilineLines[index],
   );
-  for (const node of parsed.inlineNodes) {
-    const first = lineIndexAt(starts, node.from);
-    const column = node.from - starts[first];
-    if (startsInsideDisplayMath(stripped, mathOpen, first, column, standaloneDisplay)) continue;
-    const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
-    if (first === last) continue;
-    for (let index = first; index <= last; index++) literal[index] = true;
+  regions = mathRegions(stripped, starts, standaloneDisplay, skipWithCode);
+  collectInline(parsed.inlineNodes, regions.open);
+  if (markMultiline) {
+    for (let index = 0; index < literal.length; index++) {
+      if (multilineLines[index]) literal[index] = true;
+    }
   }
+  const { open: mathOpen, ends: blockEnds } = regions;
 
   // `$$` blocks are Obsidian syntax the parser does not know. They are found
   // line by line, and the document is reparsed after blanking them so a fence
@@ -1005,7 +1040,7 @@ export function findLiteralLines(
         if (closes) inMathBlock = false;
         continue;
       }
-      if (blockLiteral[index] || literal[index]) continue;
+      if (blockLiteral[index] || literal[index] || multilineLines[index]) continue;
       const candidate = stripMathMarkers(stripped[index]);
       const opens = standaloneDisplay
         ? candidate === "$$"
@@ -1051,12 +1086,23 @@ export function findLiteralLines(
       const first = lineIndexAt(starts, node.from);
       const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
       if (first === last) continue;
-      for (let index = first; index <= last; index++) literal[index] = true;
+      collected.push({ from: node.from, to: node.to });
+      if (markMultiline) {
+        for (let index = first; index <= last; index++) literal[index] = true;
+      }
     }
     blockLiteral = nextBlock;
     if (!added && !blockChanged) break;
   }
 
+  if (codeRanges) {
+    for (const range of collected) {
+      codeRanges.push({
+        from: range.from + bomOffset,
+        to: range.to + bomOffset,
+      });
+    }
+  }
   return literal;
 }
 

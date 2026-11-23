@@ -96,16 +96,30 @@ function collectBarriers(view: EditorView): TextMask[] {
   return barriers;
 }
 
-/** Literal-line map for a whole document, computed once per edit. */
-function literalLinesFor(doc: Text): boolean[] {
+interface DocumentAnalysis {
+  literalLines: boolean[];
+  codeRanges: TextMask[];
+}
+
+/** Literal-line map and multi-line code ranges, computed once per edit. */
+function analyseDocument(doc: Text): DocumentAnalysis {
   const lines: string[] = [];
   for (const line of doc.iterLines(1, doc.lines + 1)) {
     lines.push(line);
   }
-  return findLiteralLines(lines, { displayBlocks: "standalone" });
+  const codeRanges: TextMask[] = [];
+  const literalLines = findLiteralLines(
+    lines,
+    { displayBlocks: "standalone", multilineCode: false },
+    codeRanges,
+  );
+  return { literalLines, codeRanges };
 }
 
-function buildDecorations(view: EditorView, literalLines: boolean[]): DecorationSet {
+function buildDecorations(
+  view: EditorView,
+  analysis: DocumentAnalysis,
+): DecorationSet {
   const settings = getSettings();
   if (!settings.enableLivePreviewFix) return Decoration.none;
 
@@ -143,7 +157,7 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
   }
 
   for (const lineNumber of visibleLines) {
-    if (literalLines[lineNumber - 1]) continue;
+    if (analysis.literalLines[lineNumber - 1]) continue;
     const line = doc.line(lineNumber);
     // Table rows are rendered by a widget; decorating them would compete with
     // the cell layout. Require a leading and trailing pipe so ordinary prose
@@ -200,7 +214,15 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
         return !bracketInsideToken(candidate.from) && !bracketInsideToken(candidate.to - 1);
       }),
     ];
-    const { tokens, matches } = scanPreviewLine(line.text, lineBarriers);
+    const lineCode: TextMask[] = [];
+    for (const range of analysis.codeRanges) {
+      if (range.to <= line.from || range.from >= line.to) continue;
+      lineCode.push({
+        from: Math.max(range.from, line.from) - line.from,
+        to: Math.min(range.to, line.to) - line.from,
+      });
+    }
+    const { tokens, matches } = scanPreviewLine(line.text, lineBarriers, lineCode);
     if (matches.length === 0) continue;
 
     const cursorOnLine = cursorHead >= line.from && cursorHead <= line.to;
@@ -268,19 +290,19 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
 const cjkEmphasisViewPlugin = ViewPlugin.fromClass(
   class {
     decorations: DecorationSet;
-    literalLines: boolean[];
+    analysis: DocumentAnalysis;
 
     constructor(view: EditorView) {
-      this.literalLines = literalLinesFor(view.state.doc);
-      this.decorations = buildDecorations(view, this.literalLines);
+      this.analysis = analyseDocument(view.state.doc);
+      this.decorations = buildDecorations(view, this.analysis);
     }
 
     update(update: ViewUpdate) {
       if (update.docChanged) {
-        this.literalLines = literalLinesFor(update.state.doc);
+        this.analysis = analyseDocument(update.state.doc);
       }
       if (update.docChanged || update.viewportChanged || update.selectionSet) {
-        this.decorations = buildDecorations(update.view, this.literalLines);
+        this.decorations = buildDecorations(update.view, this.analysis);
       }
     }
   },
