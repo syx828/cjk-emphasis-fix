@@ -5,7 +5,6 @@ import {
   findDocumentFixes,
   findExcessParserRanges,
   findLiteralLines,
-  findInlineMathMasks,
 } from "./scanner.bundle.mjs";
 
 function kinds(text) {
@@ -149,28 +148,6 @@ assert.deepEqual(
 
 // The command treats multi-line code lines as literal.
 assert.deepEqual(findLiteralLines(["`a", "b` **字。**后"]), [true, true]);
-
-// Single-`$` math keeps the opener across an escaped dollar, skips `$$` runs,
-// and never pairs across a protected range.
-assert.deepEqual(findInlineMathMasks("$*字。*后\\$x$"), [{ from: 0, to: 10 }]);
-assert.deepEqual(findInlineMathMasks("$$x$$*字。*后$x$"), [{ from: 10, to: 13 }]);
-assert.deepEqual(
-  findInlineMathMasks("[a](x$y) *字。*后$x$", [{ from: 4, to: 9 }]),
-  [{ from: 14, to: 17 }],
-);
-assert.deepEqual(findInlineMathMasks("\\$*字。*后\\$"), []);
-// A protected range cancels the pending opener instead of being crossed.
-assert.deepEqual(findInlineMathMasks("$x$", [{ from: 1, to: 2 }]), []);
-// The second dollar of a `$$` run is never a single-dollar closer or opener.
-assert.deepEqual(findInlineMathMasks("$a$$"), []);
-assert.deepEqual(findInlineMathMasks("$$$a$"), []);
-// An escaped dollar is literal and must not disqualify an adjacent delimiter.
-assert.deepEqual(findInlineMathMasks("$x\\$$"), [{ from: 0, to: 5 }]);
-assert.deepEqual(findInlineMathMasks("\\$$x$"), [{ from: 2, to: 5 }]);
-// Display math is a barrier for single-dollar pairing.
-assert.deepEqual(findInlineMathMasks("$$a$b$$*字。*后$x$", [{ from: 0, to: 7 }]), [
-  { from: 12, to: 15 },
-]);
 
 const highlightFix = findSourceFixes("前==重要！==后");
 assert.equal(highlightFix[0].replacement, "==重要==！");
