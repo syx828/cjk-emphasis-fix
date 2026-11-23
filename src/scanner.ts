@@ -664,6 +664,9 @@ export function findSourceFixes(text: string): SourceFix[] {
     // A body made only of markers is malformed; rewriting it would join the
     // delimiter runs into literal stars.
     if (/^[*_~=\s]*$/.test(contentWithoutPunctuation)) continue;
+    // Moving the closer past a marker run would merge delimiters and change
+    // what is emphasised, as in `**字*。**`.
+    if (contentWithoutPunctuation.endsWith(match.marker)) continue;
     // Moving the closer past a nested underscore delimiter would change which
     // marker owns the inner span; leave such lines alone.
     if (contentWithoutPunctuation.includes("_")) continue;
@@ -790,8 +793,7 @@ function markLines(
 /** YAML frontmatter: `---` on line one, a closing delimiter without a limit. */
 function findFrontmatterEnd(lines: readonly string[]): number {
   if (lines.length === 0) return -1;
-  if (lines[0].replace(/\r$/, "").replace(/^\uFEFF/, "") !== "---") return -1;
-  const limit = lines.length;
+  if (!/^(?:\uFEFF)?---[ \t]*$/.test(lines[0].replace(/\r$/, ""))) return -1;  const limit = lines.length;
   for (let index = 1; index < limit; index++) {
     const line = lines[index].replace(/\r$/, "");
     // The closing delimiter must start at column zero; an indented `---` is a
@@ -893,6 +895,12 @@ export function findLiteralLines(
 ): boolean[] {
   const standaloneDisplay = (options.displayBlocks ?? "legacy") === "standalone";
   const stripped = lines.map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
+  // A leading BOM hides the first line from the Markdown parser (indented code
+  // and fences stop being recognised). Replace it with a space so offsets do
+  // not move.
+  if (stripped.length > 0 && stripped[0].charCodeAt(0) === 0xfeff) {
+    stripped[0] = ` ${stripped[0].slice(1)}`;
+  }
   const starts = lineStartsFor(stripped);
   const frontmatterEnd = findFrontmatterEnd(lines);
 

@@ -268,6 +268,10 @@ assert.equal(findDocumentFixes("[](%%)\n%%\n*字。*x\n%%\n").length, 0);
 assert.equal(findDocumentFixes("\t$$\n$$\n`\n$$\n`\n*字。*x\n`\n").length, 0);
 assert.equal(findDocumentFixes("[[%%]]\n%%\n*字。*x\n%%\n").length, 0);
 assert.equal(findDocumentFixes("%%`%%`%%\n*字。*x\n%%\n").length, 0);
+assert.equal(findDocumentFixes("\uFEFF    *字。*x\n").length, 0);
+assert.equal(findDocumentFixes("\uFEFF~~~\n*字。*x\n~~~\n").length, 0);
+assert.equal(findDocumentFixes("--- \na: \"*字。*x\"\n---\n").length, 0);
+assert.equal(findDocumentFixes("**字*。**x\n").length, 0);
 // A URL starting with a backtick must not swallow the URL barrier.
 assert.deepEqual(
   scanPreviewLine("[](`)*字。*x`", [{ from: 3, to: 4 }]).matches.map((match) => [
