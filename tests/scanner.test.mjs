@@ -82,7 +82,16 @@ const codeFix = findSourceFixes("**加粗含 `code` 的文本。**后续");
 assert.equal(codeFix.length, 1);
 assert.equal(codeFix[0].replacement, "**加粗含 `code` 的文本**。");
 
-// Nothing left to wrap after the move.
+// Escaped markers are literal text, not delimiters.
+assert.deepEqual(kinds("a*\\*字。*后"), []);
+assert.equal(findSourceFixes("a*\\*字。*后").length, 0);
+assert.deepEqual(scanLine("\\`x`*字。*后").masks, []);
+
+// Punctuation the hand-written table missed still counts for flanking.
+assert.equal(findSourceFixes("**［字］**后").length, 0);
+assert.equal(findSourceFixes("中**«字。**后").length, 0);
+
+// Empty content after the move.
 assert.equal(findSourceFixes("**。**后").length, 0);
 
 // A closer that cannot close must not swallow the real span.
@@ -111,12 +120,23 @@ assert.equal(documentFixes.length, 3);
 assert.equal(findDocumentFixes("$$\n**字。**后\n$$\n").length, 0);
 assert.equal(findDocumentFixes("    **字。**后\n").length, 0);
 assert.equal(findDocumentFixes("\t**字。**后\n").length, 0);
+assert.equal(findDocumentFixes(" \t**字。**后\n").length, 0);
+assert.equal(findDocumentFixes("```\n\t```\n**字。**后\n").length, 0);
+assert.equal(findDocumentFixes("> ```\n> **字。**后\n> ```\n").length, 0);
 assert.equal(findDocumentFixes("```\n**字。**后\n```x\n**字。**后\n```\n").length, 0);
 assert.equal(
   findDocumentFixes(["```", "**字。**后", "```x", "**字。**后", "```", "**字。**后"].join("\n")).length,
   1,
 );
 assert.equal(findDocumentFixes("~~~\n**字。**后\n~~~\n").length, 0);
+
+// A `$$` span closed on the same line is a mask, not a block; the prose on
+// that line and after it is still fixed.
+assert.equal(findDocumentFixes("$$x$$ **字。**后\n**字。**后\n").length, 2);
+assert.equal(findDocumentFixes("$$$$\n**字。**后\n").length, 1);
+assert.equal(findDocumentFixes("    $$\n**字。**后\n").length, 1);
+// Backticks inside a math block are content, not a fence opener.
+assert.equal(findDocumentFixes("$$\n```\n$$\n**字。**后\n").length, 1);
 
 // Parser runs that overflow a marked span, including split runs.
 assert.deepEqual(findExcessParserRanges([102], [{ from: 23, to: 111 }], 200), [
@@ -126,9 +146,8 @@ assert.deepEqual(
   findExcessParserRanges([102], [{ from: 23, to: 29 }, { from: 42, to: 111 }], 200),
   [{ from: 102, to: 111 }],
 );
-assert.deepEqual(findExcessParserRanges([102], [{ from: 102, to: 111 }], 200), [
-  { from: 102, to: 111 },
-]);
+assert.deepEqual(findExcessParserRanges([102], [{ from: 102, to: 111 }], 200), []);
+assert.deepEqual(findExcessParserRanges([5], [{ from: 5, to: 8 }], 8), []);
 assert.deepEqual(findExcessParserRanges([102], [{ from: 23, to: 100 }], 200), []);
 assert.deepEqual(findExcessParserRanges([102], [{ from: 120, to: 130 }], 200), []);
 

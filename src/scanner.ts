@@ -59,6 +59,16 @@ function isMarkerAt(text: string, index: number, marker: DelimiterMarker): boole
   return index >= 0 && index < text.length && text[index] === marker;
 }
 
+function isEscaped(text: string, index: number): boolean {
+  let backslashes = 0;
+  let cursor = index - 1;
+  while (cursor >= 0 && text[cursor] === "\\") {
+    backslashes++;
+    cursor--;
+  }
+  return backslashes % 2 === 1;
+}
+
 function backtickRunEnd(text: string, start: number): number {
   let end = start;
   while (end < text.length && text[end] === "`") end++;
@@ -72,7 +82,7 @@ function closingBacktickRunEnd(text: string, start: number, length: number): num
     const runStart = text.indexOf("`", cursor);
     if (runStart === -1) return -1;
     const runEnd = backtickRunEnd(text, runStart);
-    if (runEnd - runStart === length) return runEnd;
+    if (runEnd - runStart === length && !isEscaped(text, runStart)) return runEnd;
     cursor = runEnd;
   }
   return -1;
@@ -92,6 +102,10 @@ export function findMasks(text: string): TextMask[] {
   let i = 0;
   while (i < text.length) {
     if (text[i] === "`") {
+      if (isEscaped(text, i)) {
+        i++;
+        continue;
+      }
       const runEnd = backtickRunEnd(text, i);
       const close = closingBacktickRunEnd(text, runEnd, runEnd - i);
       if (close === -1) {
@@ -103,7 +117,14 @@ export function findMasks(text: string): TextMask[] {
       continue;
     }
     if (text[i] === "$" && text[i + 1] === "$") {
-      const close = text.indexOf("$$", i + 2);
+      if (isEscaped(text, i)) {
+        i++;
+        continue;
+      }
+      let close = text.indexOf("$$", i + 2);
+      while (close !== -1 && isEscaped(text, close)) {
+        close = text.indexOf("$$", close + 2);
+      }
       if (close === -1) {
         i += 2;
         continue;
@@ -212,6 +233,13 @@ function scanWithRegex(
 
     const contentFrom = from + pass.delimiterLength;
     const contentTo = to - pass.delimiterLength;
+
+    // A backslash-escaped marker is literal text, not a delimiter.
+    if (isEscaped(text, from) || isEscaped(text, contentTo)) {
+      expression.lastIndex = from + 1;
+      continue;
+    }
+
     const candidate = isValidCandidate(text, from, to, contentFrom, contentTo, pass);
     if (!candidate) {
       // The closer the pattern picked may be a false one: a space before it, a
@@ -288,6 +316,8 @@ const CLOSING_TO_OPENING: Record<string, string> = {
   ")": "(",
   "]": "[",
   "}": "{",
+  "］": "［",
+  "｝": "｛",
 };
 
 function overlapsAnyMask(masks: TextMask[], from: number, to: number): boolean {
@@ -387,7 +417,7 @@ export function findExcessParserRanges(
   const excess: TextMask[] = [];
   for (const matchEnd of matchEnds) {
     for (const range of parserRanges) {
-      if (range.to <= matchEnd || range.from > matchEnd) continue;
+      if (range.to <= matchEnd || range.from >= matchEnd) continue;
       const from = Math.max(matchEnd, range.from);
       const to = Math.min(range.to, lineTo);
       if (to > from) excess.push({ from, to });
@@ -399,6 +429,22 @@ export function findExcessParserRanges(
 interface Fence {
   character: string;
   length: number;
+}
+
+/** Drop leading blockquote markers so quoted blocks share the same states. */
+function stripBlockquotes(line: string): string {
+  return line.replace(/^ {0,3}(?:> ?)+/, "");
+}
+
+/** Indentation width, counting a tab as advancing to the next multiple of 4. */
+function indentationColumns(line: string): number {
+  let column = 0;
+  for (const character of line) {
+    if (character === " ") column++;
+    else if (character === "\t") column += 4 - (column % 4);
+    else break;
+  }
+  return column;
 }
 
 /**
@@ -415,10 +461,15 @@ export function findDocumentFixes(text: string): SourceFix[] {
   let lineFrom = 0;
 
   for (const lineText of lines) {
+    const content = stripBlockquotes(lineText);
+    const trimmed = content.trim();
+    const indented = indentationColumns(content) >= 4;
+
     if (inFence) {
-      // A closing fence is only backticks or tildes plus trailing whitespace,
-      // at least as long as the opener. "```text" inside a block is content.
-      const closing = lineText.match(/^\s{0,3}(`{3,}|~{3,})\s*$/);
+      // A closing fence is only markers plus trailing whitespace, at least as
+      // long as the opener, indented by at most three spaces. "```text" inside
+      // a block is content, and a tab-indented run is code, not a fence.
+      const closing = !indented && content.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
       if (closing && closing[1][0] === inFence.character && closing[1].length >= inFence.length) {
         inFence = null;
       }
@@ -426,29 +477,30 @@ export function findDocumentFixes(text: string): SourceFix[] {
       continue;
     }
 
-    const opening = lineText.match(/^ {0,3}(`{3,}|~{3,})/);
+    // Math state wins over fence markers: backticks inside a math block are
+    // content, not the start of a code block.
+    if (inMathBlock) {
+      if (content.trimEnd().endsWith("$$")) inMathBlock = false;
+      lineFrom += lineText.length + 1;
+      continue;
+    }
+
+    const opening = !indented && content.match(/^ {0,3}(`{3,}|~{3,})/);
     if (opening) {
       inFence = { character: opening[1][0], length: opening[1].length };
       lineFrom += lineText.length + 1;
       continue;
     }
 
-    if (inMathBlock) {
-      if (lineText.trimEnd().endsWith("$$")) inMathBlock = false;
+    // A line that opens and closes `$$` on its own is a mask for the line
+    // scanner, not a block; only an unclosed opener starts block state.
+    if (!indented && trimmed.startsWith("$$") && trimmed.indexOf("$$", 2) === -1) {
+      inMathBlock = true;
       lineFrom += lineText.length + 1;
       continue;
     }
 
-    const trimmed = lineText.trim();
-    if (trimmed.startsWith("$$")) {
-      // `$$x$$` on one line is handled by the per-line masks; a lone `$$`
-      // opens a block that continues until a line closing with `$$`.
-      if (!(trimmed.length > 4 && trimmed.endsWith("$$"))) inMathBlock = true;
-      lineFrom += lineText.length + 1;
-      continue;
-    }
-
-    if (/^(\t| {4,})/.test(lineText)) {
+    if (indented) {
       lineFrom += lineText.length + 1;
       continue;
     }
