@@ -225,7 +225,13 @@ function scanWithRegex(
     const from = match.index;
     const to = from + match[0].length;
     const range = { from, to };
-    if (consumed.some((item) => overlaps(item, range))) continue;
+    if (consumed.some((item) => overlaps(item, range))) {
+      // This match reuses a delimiter that is already part of another span.
+      // Resume after the opener so a later span on the same line can still be
+      // found; otherwise `**甲** *乙。*续` loses the italic repair entirely.
+      expression.lastIndex = from + 1;
+      continue;
+    }
 
     // Part of a longer run of the same marker, e.g. the inner `**` of `***`.
     if (isMarkerAt(text, from - 1, pass.marker) || isMarkerAt(text, to, pass.marker)) {
@@ -402,24 +408,32 @@ export function findSourceFixes(text: string): SourceFix[] {
   return fixes;
 }
 
+export interface ParserEmphasis extends TextMask {
+  kind?: EmphasisKind;
+}
+
 /**
  * Parser emphasis that reaches past an intended closing delimiter.
  *
  * A parser run that starts inside or before the span and ends after the
  * delimiter styles characters the author did not mark. Several runs may cover
  * the same span, so every one of them is considered instead of only the first
- * range that happens to cover the whole content.
+ * range that happens to cover the whole content. A run of a different kind is
+ * a separate construct (bold next to italic) and is left alone.
  */
 export function findExcessParserRanges(
-  matchEnds: readonly number[],
-  parserRanges: readonly TextMask[],
+  matches: readonly { to: number; kind?: EmphasisKind }[],
+  parserRanges: readonly ParserEmphasis[],
   lineTo: number,
 ): TextMask[] {
   const excess: TextMask[] = [];
-  for (const matchEnd of matchEnds) {
+  for (const match of matches) {
     for (const range of parserRanges) {
-      if (range.to <= matchEnd || range.from >= matchEnd) continue;
-      const from = Math.max(matchEnd, range.from);
+      if (range.kind !== undefined && match.kind !== undefined && range.kind !== match.kind) {
+        continue;
+      }
+      if (range.to <= match.to || range.from >= match.to) continue;
+      const from = Math.max(match.to, range.from);
       const to = Math.min(range.to, lineTo);
       if (to > from) excess.push({ from, to });
     }
@@ -488,33 +502,57 @@ function findFrontmatterEnd(lines: readonly string[]): number {
  * Frontmatter and `$$` math are Obsidian constructs the parser does not know,
  * so they are layered on top.
  */
+function stripMathMarkers(line: string): string {
+  return line
+    .replace(/^(?:>\s*)+/, "")
+    .replace(/^(?:[-+*]|\d{1,9}[.)])\s+/, "")
+    .trim();
+}
+
 export function findLiteralLines(lines: readonly string[]): boolean[] {
   const stripped = lines.map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
   const starts = lineStartsFor(stripped);
   const frontmatterEnd = findFrontmatterEnd(lines);
-  const tree = markdownParser.parse(stripped.join("\n"));
 
-  const blockNodes: TextMask[] = [];
-  const inlineNodes: TextMask[] = [];
-  tree.iterate({
-    enter(node) {
-      if (node.name === "FencedCode" || node.name === "CodeBlock" || node.name === "HTMLBlock") {
-        blockNodes.push({ from: node.from, to: node.to });
-        return;
-      }
-      if (node.name === "InlineCode") {
-        inlineNodes.push({ from: node.from, to: node.to });
-      }
-    },
-  });
+  const parse = (text: string): { blockNodes: TextMask[]; inlineNodes: TextMask[] } => {
+    const blockNodes: TextMask[] = [];
+    const inlineNodes: TextMask[] = [];
+    markdownParser.parse(text).iterate({
+      enter(node) {
+        if (node.name === "FencedCode" || node.name === "CodeBlock" || node.name === "HTMLBlock") {
+          blockNodes.push({ from: node.from, to: node.to });
+          return;
+        }
+        if (node.name === "InlineCode") {
+          inlineNodes.push({ from: node.from, to: node.to });
+        }
+      },
+    });
+    return { blockNodes, inlineNodes };
+  };
 
+  const parsed = parse(stripped.join("\n"));
   const parserLiteral = new Array<boolean>(lines.length).fill(false);
-  for (const node of blockNodes) {
+  for (const node of parsed.blockNodes) {
     markLines(parserLiteral, starts, node.from, node.to);
   }
 
-  // `$$` blocks are Obsidian syntax the parser does not know, so they are
-  // located line by line. Lines inside parser blocks are code, not math.
+  const literal = new Array<boolean>(lines.length).fill(false);
+  for (let index = 0; index <= frontmatterEnd && index < literal.length; index++) {
+    literal[index] = true;
+  }
+
+  // Inline code that spans lines makes every line it touches literal. A span
+  // on one line is handled by the per-line masks.
+  for (const node of parsed.inlineNodes) {
+    const first = lineIndexAt(starts, node.from);
+    const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
+    if (first === last) continue;
+    for (let index = first; index <= last; index++) literal[index] = true;
+  }
+
+  // `$$` blocks are Obsidian syntax the parser does not know; find them line by
+  // line, skipping anything already known to be code or frontmatter.
   const mathLines = new Array<boolean>(lines.length).fill(false);
   let inMathBlock = false;
   for (let index = 0; index < stripped.length; index++) {
@@ -523,41 +561,37 @@ export function findLiteralLines(lines: readonly string[]): boolean[] {
       if (stripped[index].trimEnd().endsWith("$$")) inMathBlock = false;
       continue;
     }
-    if (parserLiteral[index] || index <= frontmatterEnd) continue;
-    const trimmed = stripped[index].trim();
+    if (parserLiteral[index] || literal[index]) continue;
+    const candidate = stripMathMarkers(stripped[index]);
     // A line that opens and closes `$$` on its own is a mask for the line
     // scanner, not a block; only an unclosed opener starts block state.
-    if (trimmed.startsWith("$$") && trimmed.indexOf("$$", 2) === -1) {
+    if (candidate.startsWith("$$") && candidate.indexOf("$$", 2) === -1) {
       mathLines[index] = true;
       inMathBlock = true;
     }
   }
-
-  // The parser reads whatever follows a `$$` opener as Markdown, so a fence it
-  // reports inside a math block is a false positive; drop those nodes.
-  const literal = new Array<boolean>(lines.length).fill(false);
-  for (const node of blockNodes) {
-    if (mathLines[lineIndexAt(starts, node.from)]) continue;
-    markLines(literal, starts, node.from, node.to);
-  }
-  for (let index = 0; index <= frontmatterEnd && index < literal.length; index++) {
-    literal[index] = true;
-  }
-  for (let index = 0; index < literal.length; index++) {
+  for (let index = 0; index < mathLines.length; index++) {
     if (mathLines[index]) literal[index] = true;
   }
 
-  for (const node of inlineNodes) {
-    const first = lineIndexAt(starts, node.from);
-    const last = lineIndexAt(starts, Math.max(node.from, node.to - 1));
-    // A span on one line is handled by the per-line masks; a span across lines
-    // makes every line it touches literal.
-    if (first === last || mathLines[first]) continue;
-    for (let index = first; index <= last; index++) literal[index] = true;
+  // Parse again with frontmatter, math and multi-line code blanked out. Without
+  // this, a fence inside those regions changes how the parser reads the rest of
+  // the document and hides real prose behind a phantom block.
+  const blanked = stripped
+    .map((line, index) => (literal[index] ? " ".repeat(line.length) : line))
+    .join("\n");
+  const reparsed = parse(blanked);
+  const blockLiteral = new Array<boolean>(lines.length).fill(false);
+  for (const node of reparsed.blockNodes) {
+    markLines(blockLiteral, starts, node.from, node.to);
+  }
+  for (let index = 0; index < literal.length; index++) {
+    if (blockLiteral[index]) literal[index] = true;
   }
 
   return literal;
 }
+
 /**
  * Scan an entire document for CJK emphasis fixes.
  *

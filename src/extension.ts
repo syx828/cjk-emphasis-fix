@@ -14,34 +14,39 @@ import {
   findLiteralLines,
   scanLine,
   EmphasisMatch,
+  ParserEmphasis,
 } from "./scanner";
-
-interface DocRange {
-  from: number;
-  to: number;
-}
 
 /**
  * Emphasis runs the parser actually produced. Obsidian sometimes produces a
  * run wider than what the author marked: when the closing delimiter fails the
  * flanking rule the run stays open and everything up to the end of the
  * paragraph is styled. Those ranges let the excess be neutralised.
+ *
+ * Node names are matched as emphasis kinds rather than substrings: `ListItem`
+ * contains "em" and would otherwise report the whole list item as emphasis.
  */
-function collectParserEmphasis(view: EditorView): DocRange[] {
-  const ranges: DocRange[] = [];
+const CONTAINER_NODE = /list|table|paragraph|document|blockquote|quote/;
+
+function parserEmphasisKind(name: string): EmphasisMatch["kind"] | null {
+  const lower = name.toLowerCase();
+  if (lower.includes("formatting") || lower.includes("mark") || CONTAINER_NODE.test(lower)) {
+    return null;
+  }
+  if (lower.includes("strongem") || lower.includes("strong-em")) return "strong-em";
+  if (lower.includes("strong")) return "strong";
+  if (lower.includes("strikethrough") || lower.includes("strike")) return "strike";
+  if (lower.includes("highlight")) return "highlight";
+  if (lower === "em" || lower.includes("emphasis")) return "em";
+  return null;
+}
+
+function collectParserEmphasis(view: EditorView): ParserEmphasis[] {
+  const ranges: ParserEmphasis[] = [];
   syntaxTree(view.state).iterate({
     enter(node) {
-      const name = node.name;
-      if (name.includes("formatting") || name.includes("Formatting")) return;
-      const isDelimited =
-        name.includes("strong") ||
-        name.includes("em") ||
-        name.includes("highlight") ||
-        name.includes("strikethrough") ||
-        name.includes("strike");
-      if (!isDelimited) return;
-      if (name.includes("mark") || name.includes("Mark")) return;
-      ranges.push({ from: node.from, to: node.to });
+      const kind = parserEmphasisKind(node.name);
+      if (kind) ranges.push({ from: node.from, to: node.to, kind });
     },
   });
   return ranges;
@@ -102,50 +107,54 @@ function buildDecorations(view: EditorView, literalLines: boolean[]): Decoration
   const plainMark = Decoration.mark({ class: "cm-cjk-plain" });
   const neutralised = new Set<string>();
 
+  const visibleLines = new Set<number>();
   for (const { from, to } of view.visibleRanges) {
     const startLine = doc.lineAt(from).number;
     const endLine = doc.lineAt(to).number;
-
     for (let lineNumber = startLine; lineNumber <= endLine; lineNumber++) {
-      if (literalLines[lineNumber - 1]) continue;
-      const line = doc.line(lineNumber);
-      const { matches } = scanLine(line.text);
-      if (matches.length === 0) continue;
+      visibleLines.add(lineNumber);
+    }
+  }
 
-      const cursorOnLine = cursorHead >= line.from && cursorHead <= line.to;
-      const lineParser = parserRanges.filter(
-        (range) => range.from < line.to && range.to > line.from,
-      );
+  for (const lineNumber of visibleLines) {
+    if (literalLines[lineNumber - 1]) continue;
+    const line = doc.line(lineNumber);
+    const { matches } = scanLine(line.text);
+    if (matches.length === 0) continue;
 
-      // The parser may style a wider run than the author marked. Several runs
-      // can be involved, so the excess is collected for the whole line first.
-      const excess = findExcessParserRanges(
-        matches.map((match) => line.from + match.to),
-        lineParser,
-        line.to,
-      );
-      for (const range of excess) {
-        const key = `${range.from}:${range.to}`;
-        if (neutralised.has(key)) continue;
-        neutralised.add(key);
-        decorations.push(plainMark.range(range.from, range.to));
-      }
+    const cursorOnLine = cursorHead >= line.from && cursorHead <= line.to;
+    const lineParser = parserRanges.filter(
+      (range) => range.from < line.to && range.to > line.from,
+    );
 
-      for (const match of matches) {
-        const mFrom = line.from + match.from;
-        const mTo = line.from + match.to;
-        const cFrom = line.from + match.contentFrom;
-        const cTo = line.from + match.contentTo;
+    // The parser may style a wider run than the author marked. Several runs
+    // can be involved, so the excess is collected for the whole line first.
+    const excess = findExcessParserRanges(
+      matches.map((match) => ({ to: line.from + match.to, kind: match.kind })),
+      lineParser,
+      line.to,
+    );
+    for (const range of excess) {
+      const key = `${range.from}:${range.to}`;
+      if (neutralised.has(key)) continue;
+      neutralised.add(key);
+      decorations.push(plainMark.range(range.from, range.to));
+    }
 
-        // Always style the content: the syntax tree is not a reliable signal
-        // that the editor rendered it, and restyling is harmless.
-        decorations.push(markFor(match.kind).range(cFrom, cTo));
+    for (const match of matches) {
+      const mFrom = line.from + match.from;
+      const mTo = line.from + match.to;
+      const cFrom = line.from + match.contentFrom;
+      const cTo = line.from + match.contentTo;
 
-        if (!(settings.keepMarkersNearCursor && cursorOnLine)) {
-          const delimiter = match.delimiterLength;
-          decorations.push(hideMarkerMark.range(mFrom, mFrom + delimiter));
-          decorations.push(hideMarkerMark.range(mTo - delimiter, mTo));
-        }
+      // Always style the content: the syntax tree is not a reliable signal
+      // that the editor rendered it, and restyling is harmless.
+      decorations.push(markFor(match.kind).range(cFrom, cTo));
+
+      if (!(settings.keepMarkersNearCursor && cursorOnLine)) {
+        const delimiter = match.delimiterLength;
+        decorations.push(hideMarkerMark.range(mFrom, mFrom + delimiter));
+        decorations.push(hideMarkerMark.range(mTo - delimiter, mTo));
       }
     }
   }

@@ -105,6 +105,10 @@ assert.deepEqual(kinds("**`x` **字。**后"), ["strong"]);
 assert.equal(scanLine("**`x` **字。**后").matches[0].from, 6);
 assert.deepEqual(kinds("*`x` *字。*后"), ["em"]);
 
+// A consumed span must not swallow the next span on the same line.
+assert.deepEqual(kinds("**甲** *乙。*续"), ["strong", "em"]);
+assert.deepEqual(kinds("**甲** *乙。*续 *丙。*续"), ["strong", "em", "em"]);
+
 const highlightFix = findSourceFixes("前==重要！==后");
 assert.equal(highlightFix[0].replacement, "==重要==！");
 
@@ -162,6 +166,21 @@ assert.deepEqual(
   [true, true, true, true, true, false],
 );
 
+// Literal regions must not leak into the rest of the document, in either
+// direction, and must follow the container they belong to.
+assert.deepEqual(findLiteralLines("`a\n$$\nb`\n\n**文。**续\n".split("\n")), [
+  true, true, true, false, false, false,
+]);
+assert.deepEqual(findLiteralLines("- $$\n  **中。**续\n  $$\n\n**文。**续\n".split("\n")), [
+  true, true, true, false, false, false,
+]);
+assert.deepEqual(findLiteralLines("---\nx: |\n  ```\n---\n**中。**续\n".split("\n")), [
+  true, true, true, true, false, false,
+]);
+assert.deepEqual(findLiteralLines("$$\n```\n$$\n```mermaid\n**中。**续\n```\n".split("\n")), [
+  true, true, true, true, true, true, false,
+]);
+
 // A fence belongs to the container it opened in.
 assert.deepEqual(findLiteralLines(["> ~~~", "**字。**后"]), [true, false]);
 assert.equal(findDocumentFixes("> ~~~\n**字。**后\n").length, 1);
@@ -190,17 +209,22 @@ assert.equal(findDocumentFixes("<div>\n**字。**后\n</div>\n\n**字。**后\n"
 assert.equal(findDocumentFixes("~~~\r\nx\r\n~~~\r\n**字。**后").length, 1);
 
 // Parser runs that overflow a marked span, including split runs.
-assert.deepEqual(findExcessParserRanges([102], [{ from: 23, to: 111 }], 200), [
+assert.deepEqual(findExcessParserRanges([{ to: 102 }], [{ from: 23, to: 111 }], 200), [
   { from: 102, to: 111 },
 ]);
 assert.deepEqual(
-  findExcessParserRanges([102], [{ from: 23, to: 29 }, { from: 42, to: 111 }], 200),
+  findExcessParserRanges([{ to: 102 }], [{ from: 23, to: 29 }, { from: 42, to: 111 }], 200),
   [{ from: 102, to: 111 }],
 );
-assert.deepEqual(findExcessParserRanges([102], [{ from: 102, to: 111 }], 200), []);
-assert.deepEqual(findExcessParserRanges([5], [{ from: 5, to: 8 }], 8), []);
-assert.deepEqual(findExcessParserRanges([102], [{ from: 23, to: 100 }], 200), []);
-assert.deepEqual(findExcessParserRanges([102], [{ from: 120, to: 130 }], 200), []);
+assert.deepEqual(findExcessParserRanges([{ to: 102 }], [{ from: 102, to: 111 }], 200), []);
+assert.deepEqual(findExcessParserRanges([{ to: 5 }], [{ from: 5, to: 8 }], 8), []);
+assert.deepEqual(findExcessParserRanges([{ to: 102 }], [{ from: 23, to: 100 }], 200), []);
+assert.deepEqual(findExcessParserRanges([{ to: 102 }], [{ from: 120, to: 130 }], 200), []);
+// A run of another kind is a separate construct, not overflow.
+assert.deepEqual(
+  findExcessParserRanges([{ to: 5, kind: "strong" }], [{ from: 5, to: 8, kind: "em" }], 8),
+  [],
+);
 
 // Every common Chinese punctuation mark, both for rendering and for the
 // optional source rewrite.

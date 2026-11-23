@@ -133,5 +133,13 @@ Related code: `src/scanner.ts` (`findLiteralLines`, `findDocumentFixes`),
   overlays remain. The parser reports fences opened inside `$$` blocks as
   false positives, so block nodes that start inside a math block are discarded
   before the literal map is built. The manual Obsidian check is still open.
+- 2026-11-23 (0.4.1): a preview-focused review found that ordinary
+  `**bold** *italic*` lines lost the italic span, and that literal regions
+  could leak in both directions when code, math and frontmatter overlapped.
+  The scanner now retries after a consumed-delimiter overlap, and the literal
+  map re-parses with frontmatter, math and multi-line code blanked out so a
+  fence inside them cannot hide the rest of the note. Parser emphasis nodes
+  are classified by kind and container nodes are excluded from neutralisation.
+
 
 
