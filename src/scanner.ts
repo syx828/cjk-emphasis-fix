@@ -1114,7 +1114,7 @@ export function findDocumentFixes(text: string): SourceFix[] {
   // not model. One character of link, HTML, math, comment, inline-code, table
   // or entity syntax disables the command for the whole note; this is a
   // deliberate safety gate, not a parser.
-  if (/[\[\]<!$|%`&]/.test(text)) return [];
+  if (/[\][<!$|%`&]/.test(text)) return [];
   const fixes: SourceFix[] = [];
   const lines = text.split("\n");
   const literal = findLiteralLines(lines);
