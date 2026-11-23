@@ -558,6 +558,7 @@ export function findWikiBarriers(
   if (candidates.length === 0) return [];
 
   const tokens = tokenizePreviewLine(text, barriers);
+  const firstBacktick = text.indexOf("`");
   const merged = mergeRanges(barriers);
   const insideBarrier = (index: number): boolean =>
     merged.some((barrier) => barrier.from <= index && index < barrier.to);
@@ -576,7 +577,7 @@ export function findWikiBarriers(
       relevant.some((token) => token.from <= index && index < token.to);
     if (insideToken(opening) || insideToken(closing)) continue;
     if (insideBarrier(opening) || insideBarrier(closing)) continue;
-    if (context) {
+    if (context && firstBacktick !== -1 && firstBacktick < candidate.from) {
       // Earlier candidates are link text, not code: their own backticks must
       // not be mistaken for the opener that owns this candidate.
       const prefixBarriers = clipBarriers(
@@ -1132,11 +1133,9 @@ export function findLiteralLines(
       if (runStart === -1) return -1;
       let runEnd = runStart;
       while (runEnd < text.length && text[runEnd] === "`") runEnd++;
-      let backslashes = 0;
-      for (let index = runStart - 1; index >= from && text[index] === "\\"; index--) {
-        backslashes++;
-      }
-      if (runEnd - runStart === width && backslashes % 2 === 0) return runEnd;
+      // Inside an accepted code span a backslash is content, so it cannot
+      // escape the closer. Escape handling belongs to the opener decision.
+      if (runEnd - runStart === width) return runEnd;
       cursor = runEnd;
     }
     return -1;
@@ -1164,11 +1163,9 @@ export function findLiteralLines(
           if (runStart === -1) break;
           let runEnd = runStart;
           while (runEnd < lineText.length && lineText[runEnd] === "`") runEnd++;
-          let backslashes = 0;
-          for (let at = runStart - 1; at >= 0 && lineText[at] === "\\"; at--) {
-            backslashes++;
-          }
-          if (runEnd - runStart === width && backslashes % 2 === 0) return true;
+          // The opener was already accepted, so a backslash before this run is
+          // code content and does not escape the closer.
+          if (runEnd - runStart === width) return true;
           cursor = runEnd;
         }
         index++;

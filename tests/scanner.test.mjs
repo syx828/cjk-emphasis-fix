@@ -951,4 +951,28 @@ assert.deepEqual(paragraphLiteral, [false, false, false]);
 assert.deepEqual(paragraphCodes, [{ from: 0, to: 7 }]);
 assert.deepEqual(previewMatches(paragraphPending, paragraphCodes), []);
 
+// A backslash inside an accepted code span is content and cannot escape the
+// closer: the exact-width run after it still ends the span.
+const escapedCloser = ["`[[a]]", "$\\`$*字*$ *文*"];
+const escapedCloserCodes = [];
+const escapedCloserLiteral = findLiteralLines(
+  escapedCloser,
+  { displayBlocks: "standalone", multilineCode: false },
+  escapedCloserCodes,
+);
+assert.deepEqual(escapedCloserLiteral, [false, false]);
+assert.deepEqual(escapedCloserCodes, [{ from: 0, to: 10 }]);
+assert.deepEqual(previewMatches(escapedCloser, escapedCloserCodes), [[16, 19]]);
+
+// An escaped first backtick is prose, not an opener: it must not be promoted
+// to a code span just because a same-width run appears later.
+const escapedOpener = ["\\`[[a]]", "$\\`$*字*$ *文*"];
+const escapedOpenerCodes = [];
+findLiteralLines(
+  escapedOpener,
+  { displayBlocks: "standalone", multilineCode: false },
+  escapedOpenerCodes,
+);
+assert.deepEqual(escapedOpenerCodes, []);
+
 console.log("scanner tests: ok");
